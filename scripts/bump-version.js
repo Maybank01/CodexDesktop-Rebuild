@@ -20,9 +20,11 @@ const ROOT_PKG = path.join(__dirname, "..", "package.json");
 const SRC_DIR = path.join(__dirname, "..", "src");
 
 function findUpstreamPkg() {
-  for (const plat of ["unix", "win"]) {
-    const p = path.join(SRC_DIR, plat, "package.json");
-    if (fs.existsSync(p)) return p;
+  for (const plat of ["mac-arm64", "mac-x64", "win", "unix"]) {
+    for (const rel of [path.join("_asar", "package.json"), "package.json"]) {
+      const p = path.join(SRC_DIR, plat, rel);
+      if (fs.existsSync(p)) return p;
+    }
   }
   // Legacy fallback
   const legacy = path.join(SRC_DIR, "package.json");
@@ -35,7 +37,7 @@ function main() {
 
   const upstreamPath = findUpstreamPkg();
   if (!upstreamPath) {
-    console.error("[x] No upstream package.json found in src/{unix,win}/");
+    console.error("[x] No upstream package.json found in src/<platform>/_asar/");
     process.exit(1);
   }
 

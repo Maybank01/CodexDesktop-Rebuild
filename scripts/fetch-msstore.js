@@ -613,8 +613,26 @@ async function main() {
   return filtered;
 }
 
+function selectArchitecturePackage(packages, architecture) {
+  const marker = `_${String(architecture).toLowerCase()}__`;
+  const pkg = packages.find((candidate) =>
+    candidate.name.toLowerCase().includes(marker) && /\.msix$/i.test(candidate.name)
+  );
+  if (!pkg) {
+    const available = packages.map((candidate) => candidate.name).join(", ");
+    throw new Error(`No ${architecture} MSIX package found. Available: ${available}`);
+  }
+  return pkg;
+}
+
 // 支持作为模块导入
-module.exports = { getCookie, getAppInfo, getFileList, getDownloadUrl };
+module.exports = {
+  getCookie,
+  getAppInfo,
+  getFileList,
+  getDownloadUrl,
+  selectArchitecturePackage,
+};
 
 // CLI 直接运行
 if (require.main === module) {

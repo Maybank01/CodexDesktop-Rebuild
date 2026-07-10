@@ -12,11 +12,12 @@
  */
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execFileSync, execSync } = require("child_process");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
 const OUT_DIR = path.join(PROJECT_ROOT, "out");
+const CODEX_RUNTIME_SOURCE = (process.env.CODEX_RUNTIME_SOURCE || "upstream").toLowerCase();
 
 const TARGET_TRIPLE_MAP = {
   "mac-arm64": "aarch64-apple-darwin",
@@ -47,6 +48,45 @@ function copyRecursive(src, dest) {
     }
   }
   return count;
+}
+
+function createZip(sourceDir, zipPath) {
+  let lastError;
+  for (const bin of ["7zz", "7z"]) {
+    try {
+      if (fs.existsSync(zipPath)) fs.rmSync(zipPath);
+      execFileSync(bin, ["a", "-tzip", "-mx=5", zipPath, "."], {
+        cwd: sourceDir,
+        stdio: "inherit",
+      });
+      return bin;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`Neither 7zz nor 7z could create the archive: ${lastError?.message || "unknown error"}`);
+}
+
+function createWindowsCompatibilityEntrypoint(appDir) {
+  const officialEntrypoint = path.join(appDir, "ChatGPT.exe");
+  const compatibilityEntrypoint = path.join(appDir, "Codex.exe");
+  const upstreamLauncherBackup = path.join(appDir, "Codex-upstream-launcher.bin");
+
+  if (!fs.existsSync(officialEntrypoint)) return;
+
+  if (fs.existsSync(compatibilityEntrypoint)) {
+    fs.copyFileSync(compatibilityEntrypoint, upstreamLauncherBackup);
+  }
+  fs.copyFileSync(officialEntrypoint, compatibilityEntrypoint);
+  console.log("   [entrypoint] Codex.exe mapped to the official ChatGPT.exe runtime");
+}
+
+function shouldReplaceCodexRuntime() {
+  if (CODEX_RUNTIME_SOURCE === "upstream") return false;
+  if (CODEX_RUNTIME_SOURCE === "cometix") return true;
+  throw new Error(
+    `Unsupported CODEX_RUNTIME_SOURCE=${CODEX_RUNTIME_SOURCE}; expected upstream or cometix`,
+  );
 }
 
 function resolveCodexVendor(platform) {
@@ -161,8 +201,13 @@ function buildMac(platform) {
   try { execSync(`codesign --remove-signature "${outApp}"`, { stdio: "pipe" }); } catch {}
   try { execSync(`xattr -rd com.apple.quarantine "${outApp}"`, { stdio: "pipe" }); } catch {}
 
-  // 6. Replace codex CLI
-  replaceCodex(platform, resourcesDir, "codex");
+  // 6. Keep the Codex CLI shipped with the official app by default. A
+  // Cometix replacement remains available as an explicit compatibility mode.
+  if (shouldReplaceCodexRuntime()) {
+    replaceCodex(platform, resourcesDir, "codex");
+  } else {
+    console.log("   [codex] keeping official upstream runtime");
+  }
 
   // 7. Ad-hoc re-sign (prevents "damaged app" Gatekeeper error)
   console.log("   [codesign] ad-hoc signing");
@@ -227,24 +272,36 @@ function buildWin(platform) {
   console.log(`   [integrity] new hash: ${newHash.slice(0, 16)}...`);
 
   if (oldHash !== newHash) {
-    // Find Codex.exe in app root
-    const exePath = path.join(outApp, "Codex.exe");
-    if (fs.existsSync(exePath)) {
-      patchExeHash(exePath, oldHash, newHash);
-    } else {
-      console.log("   [!] Codex.exe not found for hash patching");
+    // Newer MSIX packages launch ChatGPT.exe; older ones used Codex.exe.
+    const exePaths = ["ChatGPT.exe", "Codex.exe"]
+      .map((name) => path.join(outApp, name))
+      .filter((exePath) => fs.existsSync(exePath));
+    const patched = exePaths.some((exePath) => patchExeHash(exePath, oldHash, newHash));
+    if (!patched) {
+      console.log("   [integrity] no embedded ASAR hash (runtime patch not required)");
     }
   }
 
-  // Replace codex CLI
-  replaceCodex(platform, resourcesDir, "codex.exe");
+  // AgentRouter Client and older portable launchers resolve Codex.exe. The
+  // current Microsoft Store package declares ChatGPT.exe as its real desktop
+  // entrypoint, while its Codex.exe helper exits outside the MSIX identity.
+  createWindowsCompatibilityEntrypoint(outApp);
+
+  // Keep the official Store runtime so the desktop model catalog and CLI stay
+  // on the same release. Opt in to Cometix only for compatibility testing.
+  if (shouldReplaceCodexRuntime()) {
+    replaceCodex(platform, resourcesDir, "codex.exe");
+  } else {
+    console.log("   [codex] keeping official upstream runtime");
+  }
 
   // Create ZIP
   const version = getVersion(asarDir);
   const zipName = `Codex-win-x64-${version}.zip`;
   const zipPath = path.join(OUT_DIR, zipName);
   console.log(`   [zip] ${zipName}`);
-  execSync(`7zz a -tzip -mx=5 "${zipPath}" .`, { cwd: outApp });
+  const archiver = createZip(outApp, zipPath);
+  console.log(`   [zip] created with ${archiver}`);
 
   const sizeMB = (fs.statSync(zipPath).size / 1048576).toFixed(1);
   console.log(`   [ok] ${zipPath} (${sizeMB} MB)`);
@@ -264,13 +321,11 @@ function patchExeHash(exePath, oldHash, newHash) {
   const buf = fs.readFileSync(exePath);
   const oldBuf = Buffer.from(oldHash, "ascii");
   const idx = buf.indexOf(oldBuf);
-  if (idx < 0) {
-    console.log("   [!] old hash not found in exe");
-    return;
-  }
+  if (idx < 0) return false;
   Buffer.from(newHash, "ascii").copy(buf, idx);
   fs.writeFileSync(exePath, buf);
-  console.log(`   [integrity] exe hash patched at offset ${idx}`);
+  console.log(`   [integrity] ${path.basename(exePath)} hash patched at offset ${idx}`);
+  return true;
 }
 
 function updateAsarIntegrity(asarPath, infoPlistPath) {

@@ -30,6 +30,17 @@ npm run build:linux-arm64
 npm run build:all
 ```
 
+Windows builds require 7-Zip (`7zz` or `7z`) on `PATH`. The portable app is
+written to `out/win/Codex-win32-x64/`. Current upstream versions declare
+`ChatGPT.exe` as the official entrypoint; the build also maps it to `Codex.exe`
+for AgentRouter Client and older portable launchers. The distributable ZIP is
+written directly under `out/`.
+
+Desktop builds keep the official upstream Codex CLI by default so the UI and
+runtime model catalog remain on the same release. Set
+`CODEX_RUNTIME_SOURCE=cometix` only when an explicit Cometix compatibility
+build is required. Linux builds still use the platform-native Cometix runtime.
+
 ## Development
 
 ```bash
