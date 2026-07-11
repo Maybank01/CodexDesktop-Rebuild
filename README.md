@@ -41,6 +41,36 @@ runtime model catalog remain on the same release. Set
 `CODEX_RUNTIME_SOURCE=cometix` only when an explicit Cometix compatibility
 build is required. Linux builds still use the platform-native Cometix runtime.
 
+### Windows component artifacts
+
+AgentRouter Client can install the Windows Desktop Shell and Codex Core as two
+independently verified artifacts. The first Core component format owns exactly
+`resources/codex.exe` plus `agentrouter-core.json`; the Shell intentionally has
+no `resources/codex.exe` and includes `agentrouter-shell.json` instead. A Shell
+must never be activated before composition succeeds.
+
+```powershell
+# Force a fresh Store download in an isolated cache. The Shell version is read
+# from src/win/_asar/package.json; the Store package version is recorded
+# independently in scripts/.versions.json.
+node scripts/sync-upstream.js --force --skip-mac --refresh-download --cache-key windows-latest
+node scripts/patch-all.js win
+npm run build:win-shell -- --cache-key windows-latest
+
+# Package a source-built AgentRouter codex.exe and compose a test Runtime.
+node scripts/package-windows-core.js --input C:\path\to\codex.exe
+node scripts/compose-windows-runtime.js --shell out\Codex-Desktop-Shell-win-x64-<desktop-version>.zip --core out\Codex-Core-win-x64-<core-version>.zip
+node scripts/verify-windows-components.js --shell <shell.zip> --core <core.zip> --composite <composite.zip>
+
+# After both immutable release URLs are known, generate the Client v2 pointer.
+node scripts/generate-runtime-components-manifest.js --channel dev --minimum-client-version 0.1.75 --published-at 2026-07-12T00:00:00Z --shell <shell.zip> --shell-url <https-url> --core <core.zip> --core-url <https-url> --output out/runtime-components-dev.json
+```
+
+`npm run build:win-x64` remains the legacy one-file build and defaults to
+`--artifact composite`. The manual `Windows Components (Manual Test)` workflow
+builds test artifacts only; it does not create a tag or GitHub Release and does
+not require an OpenAI Authenticode signature.
+
 ## Development
 
 ```bash

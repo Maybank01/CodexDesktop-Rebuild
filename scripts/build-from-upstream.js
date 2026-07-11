@@ -8,11 +8,12 @@
  * Usage:
  *   node scripts/build-from-upstream.js --platform mac-arm64
  *   node scripts/build-from-upstream.js --platform mac-x64
- *   node scripts/build-from-upstream.js --platform win
+ *   node scripts/build-from-upstream.js --platform win [--artifact shell|composite]
  */
 const fs = require("fs");
 const path = require("path");
 const { execFileSync, execSync } = require("child_process");
+const { prepareShellTree } = require("./windows-component-util");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
@@ -230,7 +231,7 @@ function buildMac(platform) {
 
 // ─── Windows build ──────────────────────────────────────────────
 
-function buildWin(platform) {
+function buildWin(platform, { artifact, cacheKey, sourcePackageVersion }) {
   const platformDir = path.join(SRC_DIR, platform);
   const asarDir = path.join(platformDir, "_asar");
 
@@ -240,7 +241,9 @@ function buildWin(platform) {
   }
 
   // Windows: use the MSIX extract cache
-  const tempDir = path.join(require("os").tmpdir(), "codex-sync");
+  const tempDir = cacheKey
+    ? path.join(require("os").tmpdir(), "codex-sync", cacheKey)
+    : path.join(require("os").tmpdir(), "codex-sync");
   const extractDir = path.join(tempDir, "win-extract");
   const appDir = path.join(extractDir, "app");
 
@@ -287,17 +290,27 @@ function buildWin(platform) {
   // entrypoint, while its Codex.exe helper exits outside the MSIX identity.
   createWindowsCompatibilityEntrypoint(outApp);
 
-  // Keep the official Store runtime so the desktop model catalog and CLI stay
-  // on the same release. Opt in to Cometix only for compatibility testing.
-  if (shouldReplaceCodexRuntime()) {
-    replaceCodex(platform, resourcesDir, "codex.exe");
+  const version = getVersion(asarDir);
+
+  // A Shell artifact deliberately has no Core entrypoint. It cannot be
+  // activated until AgentRouter Client composes it with a verified Core.
+  if (artifact === "shell") {
+    prepareShellTree(outApp, version, { sourcePackageVersion });
+    console.log("   [component] removed resources/codex.exe and wrote agentrouter-shell.json");
   } else {
-    console.log("   [codex] keeping official upstream runtime");
+    // Keep the official Store runtime so the desktop model catalog and CLI stay
+    // on the same release. Opt in to Cometix only for compatibility testing.
+    if (shouldReplaceCodexRuntime()) {
+      replaceCodex(platform, resourcesDir, "codex.exe");
+    } else {
+      console.log("   [codex] keeping official upstream runtime");
+    }
   }
 
   // Create ZIP
-  const version = getVersion(asarDir);
-  const zipName = `Codex-win-x64-${version}.zip`;
+  const zipName = artifact === "shell"
+    ? `Codex-Desktop-Shell-win-x64-${version}.zip`
+    : `Codex-win-x64-${version}.zip`;
   const zipPath = path.join(OUT_DIR, zipName);
   console.log(`   [zip] ${zipName}`);
   const archiver = createZip(outApp, zipPath);
@@ -365,25 +378,72 @@ function getVersion(asarDir) {
   }
 }
 
+function getRecordedWindowsSyncState() {
+  const versionsPath = path.join(__dirname, ".versions.json");
+  try {
+    const versions = JSON.parse(fs.readFileSync(versionsPath, "utf-8"));
+    return {
+      sourcePackageVersion: String(versions.win?.version || "").trim() || null,
+      cacheKey: String(versions.win?.cacheKey || "").trim() || null,
+    };
+  } catch {
+    return { sourcePackageVersion: null, cacheKey: null };
+  }
+}
+
 // ─── Main ───────────────────────────────────────────────────────
 
 function main() {
   const args = process.argv.slice(2);
   const platIdx = args.indexOf("--platform");
   const platform = platIdx !== -1 ? args[platIdx + 1] : null;
+  const artifactIdx = args.indexOf("--artifact");
+  const artifact = artifactIdx !== -1 ? args[artifactIdx + 1] : "composite";
+  const sourceVersionIdx = args.indexOf("--source-package-version");
+  const explicitSourcePackageVersion = sourceVersionIdx !== -1 ? args[sourceVersionIdx + 1] : null;
+  const cacheKeyIdx = args.indexOf("--cache-key");
+  const explicitCacheKey = cacheKeyIdx !== -1 ? args[cacheKeyIdx + 1] : null;
 
   if (!platform || !["mac-arm64", "mac-x64", "win"].includes(platform)) {
-    console.error("[x] Usage: build-from-upstream.js --platform <mac-arm64|mac-x64|win>");
+    console.error("[x] Usage: build-from-upstream.js --platform <mac-arm64|mac-x64|win> [--artifact <shell|composite>]");
+    process.exit(1);
+  }
+  if (!["shell", "composite"].includes(artifact)) {
+    console.error("[x] --artifact must be shell or composite");
+    process.exit(1);
+  }
+  if (platform !== "win" && artifact !== "composite") {
+    console.error("[x] Shell components are currently supported only for Windows");
+    process.exit(1);
+  }
+  if (sourceVersionIdx !== -1 && (!explicitSourcePackageVersion || explicitSourcePackageVersion.startsWith("--"))) {
+    console.error("[x] --source-package-version requires a value");
+    process.exit(1);
+  }
+  if (cacheKeyIdx !== -1 && (!explicitCacheKey || explicitCacheKey.startsWith("--"))) {
+    console.error("[x] --cache-key requires a value");
+    process.exit(1);
+  }
+  if (explicitCacheKey && !/^[0-9A-Za-z._-]+$/.test(explicitCacheKey)) {
+    console.error("[x] --cache-key may contain only letters, numbers, dot, underscore, and dash");
     process.exit(1);
   }
 
-  console.log(`\n== Build from upstream: ${platform} ==\n`);
+  const recordedSyncState = getRecordedWindowsSyncState();
+  const sourcePackageVersion = explicitSourcePackageVersion || recordedSyncState.sourcePackageVersion;
+  const cacheKey = explicitCacheKey || recordedSyncState.cacheKey;
+  if (platform === "win" && artifact === "shell" && !sourcePackageVersion) {
+    console.error("[x] Shell builds require Windows sourcePackageVersion from sync-upstream or --source-package-version");
+    process.exit(1);
+  }
+
+  console.log(`\n== Build from upstream: ${platform} (${artifact}) ==\n`);
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
   if (platform.startsWith("mac")) {
     buildMac(platform);
   } else {
-    buildWin(platform);
+    buildWin(platform, { artifact, cacheKey, sourcePackageVersion });
   }
 }
 

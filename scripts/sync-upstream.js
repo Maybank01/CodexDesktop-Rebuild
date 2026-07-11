@@ -14,6 +14,7 @@
  *
  * Usage:
  *   node scripts/sync-upstream.js [--force] [--skip-mac] [--skip-win]
+ *     [--refresh-download] [--cache-key <safe-key>]
  */
 
 const https = require("https");
@@ -22,6 +23,36 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
+
+function parseSyncOptions(argv) {
+  const cacheKeyIndex = argv.indexOf("--cache-key");
+  const cacheKey = cacheKeyIndex === -1 ? null : argv[cacheKeyIndex + 1];
+  if (cacheKeyIndex !== -1 && (!cacheKey || cacheKey.startsWith("--"))) {
+    throw new Error("--cache-key requires a value");
+  }
+  if (cacheKey && !/^[0-9A-Za-z._-]+$/.test(cacheKey)) {
+    throw new Error("--cache-key may contain only letters, numbers, dot, underscore, and dash");
+  }
+  return {
+    force: argv.includes("--force"),
+    checkOnly: argv.includes("--check-only"),
+    skipMac: argv.includes("--skip-mac"),
+    skipWin: argv.includes("--skip-win"),
+    refreshDownload: argv.includes("--refresh-download"),
+    cacheKey,
+  };
+}
+
+function getSyncCacheDir(cacheKey, tempRoot = require("os").tmpdir()) {
+  const base = path.join(tempRoot, "codex-sync");
+  return cacheKey ? path.join(base, cacheKey) : base;
+}
+
+function refreshCachedArchive(archivePath, enabled) {
+  if (!enabled || !fs.existsSync(archivePath)) return false;
+  fs.rmSync(archivePath, { force: true });
+  return true;
+}
 
 // TLS certs for MS delivery CDN
 const certsDir = path.join(__dirname, "certs");
@@ -34,17 +65,18 @@ https.globalAgent.options.ca = extraCAs;
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
-const TEMP_DIR = path.join(require("os").tmpdir(), "codex-sync");
+const OPTIONS = parseSyncOptions(process.argv.slice(2));
+const TEMP_DIR = getSyncCacheDir(OPTIONS.cacheKey);
 const VERSION_FILE = path.join(__dirname, ".versions.json");
 
 const APPCAST_ARM64 = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml";
 const APPCAST_X64 = "https://persistent.oaistatic.com/codex-app-prod/appcast-x64.xml";
 
-const args = process.argv.slice(2);
-const FORCE = args.includes("--force");
-const CHECK_ONLY = args.includes("--check-only");
-const SKIP_MAC = args.includes("--skip-mac");
-const SKIP_WIN = args.includes("--skip-win");
+const FORCE = OPTIONS.force;
+const CHECK_ONLY = OPTIONS.checkOnly;
+const SKIP_MAC = OPTIONS.skipMac;
+const SKIP_WIN = OPTIONS.skipWin;
+const REFRESH_DOWNLOAD = OPTIONS.refreshDownload;
 
 // ─── Helpers ────────────────────────────────────────────────────
 
@@ -207,6 +239,9 @@ async function syncMac(variant, appcastUrl, destDir) {
   const zipPath = path.join(TEMP_DIR, `Codex-${variant}-${info.version}.zip`);
   const extractDir = path.join(TEMP_DIR, `${variant}-extract`);
 
+  if (refreshCachedArchive(zipPath, REFRESH_DOWNLOAD)) {
+    console.log(`   [refresh] removed cached archive ${zipPath}`);
+  }
   if (!fs.existsSync(zipPath)) {
     curlDownload(info.url, zipPath, label);
   } else {
@@ -235,6 +270,9 @@ async function syncWin(destDir) {
   const msixPath = path.join(TEMP_DIR, info.packageName || `codex-win-${info.version}.msix`);
   const extractDir = path.join(TEMP_DIR, "win-extract");
 
+  if (refreshCachedArchive(msixPath, REFRESH_DOWNLOAD)) {
+    console.log(`   [refresh] removed cached archive ${msixPath}`);
+  }
   if (!fs.existsSync(msixPath)) {
     curlDownload(info.url, msixPath, "Windows MSIX");
   } else {
@@ -388,7 +426,12 @@ async function main() {
 
   const saved = loadVersions();
   for (const [key, info] of Object.entries(results)) {
-    saved[key] = { version: info.version, build: info.build || "", checkedAt: new Date().toISOString() };
+    saved[key] = {
+      version: info.version,
+      build: info.build || "",
+      checkedAt: new Date().toISOString(),
+      cacheKey: OPTIONS.cacheKey,
+    };
   }
   saveVersions(saved);
 
@@ -398,4 +441,8 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(`\n[x] ${e.message}`); process.exit(1); });
+module.exports = { getSyncCacheDir, parseSyncOptions, refreshCachedArchive };
+
+if (require.main === module) {
+  main().catch((e) => { console.error(`\n[x] ${e.message}`); process.exit(1); });
+}

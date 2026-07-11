@@ -1,0 +1,221 @@
+name: Windows Components (Manual Test)
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact:
+        description: "Component artifact to build"
+        required: true
+        default: "all"
+        type: choice
+        options: [all, shell, core, composition]
+      cache_key:
+        description: "Isolated upstream download cache key"
+        required: true
+        default: "manual-windows-latest"
+        type: string
+      refresh_download:
+        description: "Discard the selected cache archive and download it again"
+        required: true
+        default: true
+        type: boolean
+      core_binary_url:
+        description: "Optional HTTPS codex.exe URL; empty uses the freshly synced Store binary"
+        required: false
+        default: ""
+        type: string
+      core_binary_sha256:
+        description: "Required SHA256 when core_binary_url is set"
+        required: false
+        default: ""
+        type: string
+      core_version:
+        description: "Optional Core version override (avoids executing the input for --version)"
+        required: false
+        default: ""
+        type: string
+
+env:
+  NODE_VERSION: "24"
+
+jobs:
+  build-windows-components:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install 7-Zip
+        run: choco install 7zip -y
+
+      - name: Add 7zz alias
+        shell: powershell
+        run: |
+          Copy-Item "C:\Program Files\7-Zip\7z.exe" "C:\Program Files\7-Zip\7zz.exe"
+          "C:\Program Files\7-Zip" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Test component contracts
+        shell: powershell
+        run: |
+          $env:CODEX_COMPONENT_TEMP_DIR = Join-Path $env:RUNNER_TEMP "codex-component-tests"
+          node --test scripts/tests/windows-components.test.js
+
+      - name: Sync fresh Windows upstream
+        if: inputs.artifact != 'core' || inputs.core_binary_url == ''
+        shell: powershell
+        env:
+          COMPONENT_CACHE_KEY: ${{ inputs.cache_key }}
+          REFRESH_DOWNLOAD: ${{ inputs.refresh_download }}
+        run: |
+          $syncArgs = @(
+            "scripts/sync-upstream.js",
+            "--force",
+            "--skip-mac",
+            "--cache-key",
+            "$env:COMPONENT_CACHE_KEY"
+          )
+          if ($env:REFRESH_DOWNLOAD -eq "true") {
+            $syncArgs += "--refresh-download"
+          }
+          & node @syncArgs
+
+      - name: Record actual Windows versions
+        id: windows_versions
+        if: inputs.artifact != 'core' || inputs.core_binary_url == ''
+        shell: powershell
+        run: |
+          $desktop = Get-Content "src\win\_asar\package.json" -Raw | ConvertFrom-Json
+          $syncState = Get-Content "scripts\.versions.json" -Raw | ConvertFrom-Json
+          if (-not $desktop.version) { throw "Windows ASAR package.json has no version." }
+          if (-not $syncState.win.version) { throw "Windows sync state has no source package version." }
+          "desktop_version=$($desktop.version)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          "source_package_version=$($syncState.win.version)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          Write-Host "Windows Desktop Shell version: $($desktop.version)"
+          Write-Host "Windows Store source package version: $($syncState.win.version)"
+
+      - name: Patch Windows Desktop Shell
+        if: inputs.artifact == 'all' || inputs.artifact == 'shell' || inputs.artifact == 'composition'
+        run: node scripts/patch-all.js win
+
+      - name: Build Windows Desktop Shell
+        if: inputs.artifact == 'all' || inputs.artifact == 'shell' || inputs.artifact == 'composition'
+        shell: powershell
+        env:
+          COMPONENT_CACHE_KEY: ${{ inputs.cache_key }}
+          SOURCE_PACKAGE_VERSION: ${{ steps.windows_versions.outputs.source_package_version }}
+        run: |
+          node scripts/build-from-upstream.js `
+            --platform win `
+            --artifact shell `
+            --cache-key "$env:COMPONENT_CACHE_KEY" `
+            --source-package-version "$env:SOURCE_PACKAGE_VERSION"
+
+      - name: Resolve Core input
+        id: core_input
+        if: inputs.artifact == 'all' || inputs.artifact == 'core' || inputs.artifact == 'composition'
+        shell: powershell
+        env:
+          CORE_BINARY_URL: ${{ inputs.core_binary_url }}
+          CORE_BINARY_SHA256: ${{ inputs.core_binary_sha256 }}
+        run: |
+          $url = $env:CORE_BINARY_URL.Trim()
+          if ($url) {
+            if (-not $url.StartsWith("https://")) { throw "core_binary_url must use HTTPS." }
+            $expected = $env:CORE_BINARY_SHA256.Trim().ToLowerInvariant()
+            if ($expected.StartsWith("sha256:")) { $expected = $expected.Substring(7) }
+            if ($expected -notmatch "^[0-9a-f]{64}$") {
+              throw "core_binary_sha256 must be supplied as 64 hexadecimal characters."
+            }
+            $coreDir = Join-Path $env:RUNNER_TEMP "agentrouter-core-input"
+            New-Item -ItemType Directory -Force -Path $coreDir | Out-Null
+            $corePath = Join-Path $coreDir "codex.exe"
+            Invoke-WebRequest -Uri $url -OutFile $corePath -UseBasicParsing
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $corePath).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) { throw "Downloaded Core SHA256 mismatch." }
+          } else {
+            $corePath = (Resolve-Path "src\win\codex.exe").Path
+          }
+          "path=$corePath" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
+      - name: Package Windows Core
+        if: inputs.artifact == 'all' || inputs.artifact == 'core' || inputs.artifact == 'composition'
+        shell: powershell
+        env:
+          CORE_VERSION: ${{ inputs.core_version }}
+        run: |
+          $packageArgs = @(
+            "scripts/package-windows-core.js",
+            "--input",
+            "${{ steps.core_input.outputs.path }}",
+            "--output",
+            "out/Codex-Core-win-x64-dev-${{ github.run_number }}.zip",
+            "--temp-dir",
+            "$env:RUNNER_TEMP/codex-component-package"
+          )
+          $coreVersion = $env:CORE_VERSION.Trim()
+          if ($coreVersion) { $packageArgs += @("--core-version", $coreVersion) }
+          & node @packageArgs
+
+      - name: Compose test Runtime
+        if: inputs.artifact == 'all' || inputs.artifact == 'composition'
+        shell: powershell
+        run: |
+          $shell = Get-ChildItem "out\Codex-Desktop-Shell-win-x64-*.zip" | Select-Object -First 1
+          if (-not $shell) { throw "Shell artifact was not created." }
+          node scripts/compose-windows-runtime.js `
+            --shell $shell.FullName `
+            --core "out/Codex-Core-win-x64-dev-${{ github.run_number }}.zip" `
+            --output "out/Codex-win-x64-component-test-${{ github.run_number }}.zip" `
+            --temp-dir "$env:RUNNER_TEMP/codex-component-composition"
+
+      - name: Verify built components
+        shell: powershell
+        run: |
+          $verifyArgs = @("scripts/verify-windows-components.js", "--temp-dir", "$env:RUNNER_TEMP/codex-component-verify")
+          if ("${{ inputs.artifact }}" -in @("all", "shell", "composition")) {
+            $shell = Get-ChildItem "out\Codex-Desktop-Shell-win-x64-*.zip" | Select-Object -First 1
+            $verifyArgs += @("--shell", $shell.FullName)
+          }
+          if ("${{ inputs.artifact }}" -in @("all", "core", "composition")) {
+            $verifyArgs += @("--core", "out/Codex-Core-win-x64-dev-${{ github.run_number }}.zip")
+          }
+          if ("${{ inputs.artifact }}" -in @("all", "composition")) {
+            $verifyArgs += @("--composite", "out/Codex-win-x64-component-test-${{ github.run_number }}.zip")
+          }
+          & node @verifyArgs
+
+      - name: Upload Desktop Shell test artifact
+        if: inputs.artifact == 'all' || inputs.artifact == 'shell' || inputs.artifact == 'composition'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Codex-Desktop-Shell-Windows-x64-${{ steps.windows_versions.outputs.desktop_version }}
+          path: out/Codex-Desktop-Shell-win-x64-*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Core test artifact
+        if: inputs.artifact == 'all' || inputs.artifact == 'core' || inputs.artifact == 'composition'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Codex-Core-Windows-x64-dev-${{ github.run_number }}
+          path: out/Codex-Core-win-x64-dev-${{ github.run_number }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload composition test artifact
+        if: inputs.artifact == 'all' || inputs.artifact == 'composition'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Codex-Windows-x64-composition-test-${{ github.run_number }}
+          path: out/Codex-win-x64-component-test-${{ github.run_number }}.zip
+          if-no-files-found: error
+          retention-days: 7
