@@ -155,11 +155,13 @@ function locateTargets(platform) {
 function main() {
   const args = process.argv.slice(2);
   const isCheck = args.includes("--check");
+  const requireChange = args.includes("--require-change");
   const platform = args.find((a) => ["mac-arm64", "mac-x64", "win"].includes(a));
 
   const targets = locateTargets(platform);
 
   if (targets.length === 0) {
+    if (requireChange) throw new Error("Required i18n gate target was not found");
     console.log("[ok] No files contain enable_i18n (upstream may have removed gate)");
     return;
   }
@@ -205,6 +207,9 @@ function main() {
 
   if (isCheck && grandTotal > 0) {
     console.log(`\n=> Total: ${grandTotal} patchable locations`);
+  }
+  if (requireChange && grandTotal === 0) {
+    throw new Error("Required i18n patch matched zero locations");
   }
 }
 

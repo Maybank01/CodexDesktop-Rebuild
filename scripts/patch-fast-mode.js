@@ -5,10 +5,10 @@
  * The speed selector is gated by authMethod === "chatgpt" checks.
  * API-key users never see it because their authMethod differs.
  *
- * This patch locates BinaryExpression nodes matching:
- *   X.authMethod !== "chatgpt"
- * inside functions that also reference "fast_mode", and replaces
- * the comparison with !1 (always false), removing the auth gate.
+ * This patch locates chatgpt auth comparisons inside functions that also
+ * reference both "authMethod" and "fast_mode". Negative comparisons become
+ * false and positive comparisons become true, preserving Fast mode for
+ * AgentRouter API authentication across both upstream gate shapes.
  *
  * Target: permissions-mode-helpers-*.js (or any chunk with the pattern)
  */
@@ -47,15 +47,26 @@ function collectPatches(ast, source) {
     const fnSrc = source.slice(node.start, node.end);
     if (!fnSrc.includes("authMethod") || !fnSrc.includes("fast_mode")) return;
 
-    // Inside this function, find: X.authMethod !== `chatgpt`
+    // Inside this function, find either a direct authMethod comparison or the
+    // newer aliased form (the containing function still carries authMethod).
     walk(node, (child) => {
-      if (child.type !== "BinaryExpression" || child.operator !== "!==") return;
+      if (
+        child.type !== "BinaryExpression" ||
+        !["!==", "==="].includes(child.operator)
+      ) return;
 
       const childSrc = source.slice(child.start, child.end);
-      if (!childSrc.includes("authMethod") || !childSrc.includes("chatgpt"))
-        return;
-
-      if (childSrc === "!1") return;
+      const left = child.left;
+      const right = child.right;
+      const leftValue = left.type === "Literal" ? left.value : null;
+      const rightValue = right.type === "Literal" ? right.value : null;
+      const leftTemplate = left.type === "TemplateLiteral" && left.expressions.length === 0
+        ? left.quasis[0]?.value?.cooked
+        : null;
+      const rightTemplate = right.type === "TemplateLiteral" && right.expressions.length === 0
+        ? right.quasis[0]?.value?.cooked
+        : null;
+      if (![leftValue, rightValue, leftTemplate, rightTemplate].includes("chatgpt")) return;
 
       // Avoid duplicate patches at same offset
       if (patches.some((p) => p.start === child.start)) return;
@@ -64,7 +75,7 @@ function collectPatches(ast, source) {
         id: "fast_mode_auth_gate",
         start: child.start,
         end: child.end,
-        replacement: "!1",
+        replacement: child.operator === "!==" ? "!1" : "!0",
         original: childSrc,
       });
     });
@@ -76,6 +87,7 @@ function collectPatches(ast, source) {
 function main() {
   const args = process.argv.slice(2);
   const isCheck = args.includes("--check");
+  const requireChange = args.includes("--require-change");
   const platform = args.find((a) =>
     ["mac-arm64", "mac-x64", "win"].includes(a),
   );
@@ -101,11 +113,13 @@ function main() {
   }
 
   if (targets.length === 0) {
+    if (requireChange) throw new Error("Required fast_mode gate target was not found");
     console.log("  [skip] No chunk contains fast_mode gate logic");
     return;
   }
 
   let totalPatched = 0;
+  let totalMatched = 0;
 
   for (const bundle of targets) {
     const source = fs.readFileSync(bundle.path, "utf-8");
@@ -114,11 +128,13 @@ function main() {
     let ast;
     try {
       ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
-    } catch {
+    } catch (error) {
+      if (requireChange) throw error;
       continue;
     }
 
     const patches = collectPatches(ast, source);
+    totalMatched += patches.length;
 
     if (patches.length === 0) continue;
 
@@ -150,6 +166,11 @@ function main() {
   } else {
     console.log("  [ok] fast_mode auth gates already patched or absent");
   }
+  if (requireChange && totalMatched === 0) {
+    throw new Error("Required fast_mode patch matched zero locations");
+  }
 }
 
-main();
+module.exports = { collectPatches };
+
+if (require.main === module) main();

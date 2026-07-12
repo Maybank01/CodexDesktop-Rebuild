@@ -82,8 +82,6 @@ gate 2307253562 → codex_git_commit
 | `patch-sunset.js` | gate `2929582856` | `Cs(i)` → `!1`，短路 sunset 守卫 |
 | `patch-statsig-logger.js` | `_setStatus()` | 注入日志，打印所有 gates/configs/layers 值 |
 | `patch-i18n.js` | `qNe()` | 注入 `en-US` 到语言选择器列表 |
-| `patch-devtools.js` | `allowInspectElement` / `devTools` | 属性值 → `!0` |
-| `patch-copyright.js` | About Dialog / setAboutPanelOptions | 替换版权文本 |
 | `patch-process-polyfill.js` | Windows `process` polyfill | 注入 `process.env`/`process.platform` |
 
 ## 备注

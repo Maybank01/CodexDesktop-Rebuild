@@ -19,6 +19,7 @@ const PATCHED = "if(!r.hidden||u&&n.has(r.model)){";
 function main() {
   const args = process.argv.slice(2);
   const isCheck = args.includes("--check");
+  const requireChange = args.includes("--require-change");
   const platform = args.find((arg) =>
     ["mac-arm64", "mac-x64", "win"].includes(arg),
   );
@@ -34,6 +35,7 @@ function main() {
   }
 
   let changed = 0;
+  let matched = 0;
   for (const target of targets) {
     const source = fs.readFileSync(target.path, "utf-8");
     const originalCount = source.split(ORIGINAL).length - 1;
@@ -52,12 +54,18 @@ function main() {
     }
     if (isCheck) {
       console.log("    [?] preserve visible models and union allowed hidden models");
+      matched++;
       continue;
     }
 
     fs.writeFileSync(target.path, source.replace(ORIGINAL, PATCHED), "utf-8");
     console.log("    [ok] visible models preserved; allowed hidden models still included");
+    matched++;
     changed++;
+  }
+
+  if (requireChange && matched === 0) {
+    throw new Error("Required model-list-filter patch matched zero locations");
   }
 
   console.log(

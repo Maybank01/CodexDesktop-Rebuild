@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFileSync, spawnSync } = require("node:child_process");
 const test = require("node:test");
+const { parse } = require("acorn");
 
 const {
   COMPOSITION_MANIFEST_NAME,
@@ -22,8 +23,43 @@ const {
   writeJson,
 } = require("../windows-component-util");
 const { getSyncCacheDir, parseSyncOptions, refreshCachedArchive } = require("../sync-upstream");
+const { PATCHES, getPassArgs } = require("../patch-all");
+const { collectPatches: collectFastModePatches } = require("../patch-fast-mode");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
+
+test("maintained Shell patch chain is minimal and strict by default", () => {
+  assert.deepEqual(PATCHES, [
+    "patch-i18n.js",
+    "patch-fast-mode.js",
+    "patch-model-list-filter.js",
+    "patch-plugin-auth.js",
+    "patch-updater.js",
+  ]);
+  assert.deepEqual(getPassArgs(["win"]), ["win", "--require-change"]);
+  assert.deepEqual(getPassArgs(["win", "--check"]), [
+    "win",
+    "--check",
+    "--require-change",
+  ]);
+  assert.deepEqual(getPassArgs(["win", "--allow-noop"]), ["win"]);
+});
+
+test("Fast mode patch covers negative and positive ChatGPT auth gates", () => {
+  const source = [
+    'function read(n,e){e.query.setData("key",{authMethod:n});if(n!=="chatgpt")return false;return {fast_mode:true}}',
+    'function allowed(a){let enabled=a?.authMethod==="chatgpt";return enabled&&a.fast_mode}',
+  ].join(";");
+  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  const patches = collectFastModePatches(ast, source);
+  assert.deepEqual(
+    patches.map((patch) => ({ original: patch.original, replacement: patch.replacement })),
+    [
+      { original: 'n!=="chatgpt"', replacement: "!1" },
+      { original: 'a?.authMethod==="chatgpt"', replacement: "!0" },
+    ],
+  );
+});
 
 function runScript(scriptName, args) {
   return execFileSync(process.execPath, [path.join(PROJECT_ROOT, "scripts", scriptName), ...args], {

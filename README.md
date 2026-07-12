@@ -66,6 +66,10 @@ node scripts/verify-windows-components.js --shell <shell.zip> --core <core.zip> 
 node scripts/generate-runtime-components-manifest.js --channel dev --minimum-client-version 0.1.75 --published-at 2026-07-12T00:00:00Z --shell <shell.zip> --shell-url <https-url> --core <core.zip> --core-url <https-url> --output out/runtime-components-dev.json
 ```
 
+`patch-all.js` treats every maintained patch as required and exits non-zero if
+the freshly synchronized upstream tree no longer matches. Use `--allow-noop`
+only when deliberately re-checking a tree that was already patched.
+
 `npm run build:win-x64` remains the legacy one-file build and defaults to
 `--artifact composite`. The manual `Windows Components (Manual Test)` workflow
 builds test artifacts only; it does not create a tag or GitHub Release and does
@@ -87,7 +91,7 @@ npm run dev
 │   ├── electron.icns    # App icon
 │   └── notification.wav # Sound
 ├── scripts/
-│   └── patch-copyright.js
+│   └── patch-all.js      # Required AgentRouter Shell patch chain
 ├── forge.config.js      # Electron Forge config
 └── package.json
 ```

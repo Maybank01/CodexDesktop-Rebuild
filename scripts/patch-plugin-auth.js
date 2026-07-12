@@ -438,11 +438,13 @@ function locateTargets(platform) {
 function main() {
   const args = process.argv.slice(2);
   const isCheck = args.includes("--check");
+  const requireChange = args.includes("--require-change");
   const platform = args.find((a) => ["mac-arm64", "mac-x64", "win"].includes(a));
 
   const targets = locateTargets(platform);
 
   if (targets.length === 0) {
+    if (requireChange) throw new Error("Required plugin auth targets were not found");
     console.log("[ok] No plugin auth or browser-use targets found");
     return;
   }
@@ -454,6 +456,7 @@ function main() {
     return true;
   });
 
+  let totalMatched = 0;
   for (const bundle of unique) {
     console.log(`\n-- [${bundle.platform}] ${relPath(bundle.path)}`);
     const source = fs.readFileSync(bundle.path, "utf-8");
@@ -473,6 +476,7 @@ function main() {
       patches.push(...findFeatureDefaultPatches(ast, source));
     if (bundle.rules.includes("goal"))
       patches.push(...findGoalGatePatches(ast, source));
+    totalMatched += patches.length;
 
     if (patches.length === 0) {
       console.log("   [ok] Already patched or no match");
@@ -494,6 +498,9 @@ function main() {
 
     fs.writeFileSync(bundle.path, code, "utf-8");
     console.log(`   [ok] ${patches.length} gates patched`);
+  }
+  if (requireChange && totalMatched === 0) {
+    throw new Error("Required plugin auth patch matched zero locations");
   }
 }
 
