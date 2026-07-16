@@ -19,6 +19,7 @@ const { execSync } = require("child_process");
 
 const SRC = path.join(__dirname, "..", "src");
 const PROJECT_ROOT = path.join(__dirname, "..");
+const CODEX_RUNTIME_SOURCE = (process.env.CODEX_RUNTIME_SOURCE || "upstream").toLowerCase();
 
 const TARGET_TRIPLE_MAP = {
   "mac-arm64": "aarch64-apple-darwin",
@@ -130,6 +131,15 @@ function resolveRgVendor(platform) {
   return fs.existsSync(p) ? p : null;
 }
 
+function shouldReplaceCodexRuntime(platform) {
+  if (platform.startsWith("linux")) return true;
+  if (CODEX_RUNTIME_SOURCE === "upstream") return false;
+  if (CODEX_RUNTIME_SOURCE === "cometix") return true;
+  throw new Error(
+    `Unsupported CODEX_RUNTIME_SOURCE=${CODEX_RUNTIME_SOURCE}; expected upstream or cometix`,
+  );
+}
+
 function main() {
   const args = process.argv.slice(2);
   const platIdx = args.indexOf("--platform");
@@ -170,7 +180,8 @@ function main() {
   // 2. Replace codex binary with @cometix/codex
   const isWin = platform === "win";
   const codexBinName = isWin ? "codex.exe" : "codex";
-  const vendorCodex = resolveCodexVendor(platform);
+  const replaceRuntime = shouldReplaceCodexRuntime(platform);
+  const vendorCodex = replaceRuntime ? resolveCodexVendor(platform) : null;
   if (vendorCodex) {
     // For Linux: put codex in sourceDir (mac-x64/) so it can be found,
     // but also mark for later copy to forge output.
@@ -178,8 +189,10 @@ function main() {
     fs.copyFileSync(vendorCodex, dest);
     try { fs.chmodSync(dest, 0o755); } catch {}
     console.log(`   [codex] replaced with @cometix/codex`);
-  } else {
+  } else if (replaceRuntime) {
     console.log(`   [!] @cometix/codex vendor not found for ${platform}, keeping upstream`);
+  } else {
+    console.log("   [codex] keeping official upstream runtime");
   }
 
   // 2b. For Linux: replace rg with platform-native version from @cometix/codex

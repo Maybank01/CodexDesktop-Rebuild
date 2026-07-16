@@ -14,6 +14,7 @@
  *
  * Usage:
  *   node scripts/sync-upstream.js [--force] [--skip-mac] [--skip-win]
+ *     [--refresh-download] [--cache-key <safe-key>]
  */
 
 const https = require("https");
@@ -22,6 +23,36 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
+
+function parseSyncOptions(argv) {
+  const cacheKeyIndex = argv.indexOf("--cache-key");
+  const cacheKey = cacheKeyIndex === -1 ? null : argv[cacheKeyIndex + 1];
+  if (cacheKeyIndex !== -1 && (!cacheKey || cacheKey.startsWith("--"))) {
+    throw new Error("--cache-key requires a value");
+  }
+  if (cacheKey && !/^[0-9A-Za-z._-]+$/.test(cacheKey)) {
+    throw new Error("--cache-key may contain only letters, numbers, dot, underscore, and dash");
+  }
+  return {
+    force: argv.includes("--force"),
+    checkOnly: argv.includes("--check-only"),
+    skipMac: argv.includes("--skip-mac"),
+    skipWin: argv.includes("--skip-win"),
+    refreshDownload: argv.includes("--refresh-download"),
+    cacheKey,
+  };
+}
+
+function getSyncCacheDir(cacheKey, tempRoot = require("os").tmpdir()) {
+  const base = path.join(tempRoot, "codex-sync");
+  return cacheKey ? path.join(base, cacheKey) : base;
+}
+
+function refreshCachedArchive(archivePath, enabled) {
+  if (!enabled || !fs.existsSync(archivePath)) return false;
+  fs.rmSync(archivePath, { force: true });
+  return true;
+}
 
 // TLS certs for MS delivery CDN
 const certsDir = path.join(__dirname, "certs");
@@ -34,17 +65,18 @@ https.globalAgent.options.ca = extraCAs;
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
-const TEMP_DIR = path.join(require("os").tmpdir(), "codex-sync");
+const OPTIONS = parseSyncOptions(process.argv.slice(2));
+const TEMP_DIR = getSyncCacheDir(OPTIONS.cacheKey);
 const VERSION_FILE = path.join(__dirname, ".versions.json");
 
 const APPCAST_ARM64 = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml";
 const APPCAST_X64 = "https://persistent.oaistatic.com/codex-app-prod/appcast-x64.xml";
 
-const args = process.argv.slice(2);
-const FORCE = args.includes("--force");
-const CHECK_ONLY = args.includes("--check-only");
-const SKIP_MAC = args.includes("--skip-mac");
-const SKIP_WIN = args.includes("--skip-win");
+const FORCE = OPTIONS.force;
+const CHECK_ONLY = OPTIONS.checkOnly;
+const SKIP_MAC = OPTIONS.skipMac;
+const SKIP_WIN = OPTIONS.skipWin;
+const REFRESH_DOWNLOAD = OPTIONS.refreshDownload;
 
 // ─── Helpers ────────────────────────────────────────────────────
 
@@ -110,6 +142,50 @@ function clearDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
+/**
+ * MSIX stores path segments containing reserved characters in URL-encoded form
+ * (for example, npm scopes are written as "%40worklouder"). Windows decodes
+ * those names while installing the package, but generic archive tools do not.
+ * Normalize the extracted tree before reading app.asar.unpacked or copying the
+ * other resources into a portable build.
+ */
+function decodeMsixPaths(root) {
+  const entries = [];
+
+  function visit(dir, depth) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) visit(full, depth + 1);
+      entries.push({ full, name: entry.name, depth });
+    }
+  }
+
+  visit(root, 0);
+  entries.sort((a, b) => b.depth - a.depth);
+
+  let renamed = 0;
+  for (const entry of entries) {
+    if (!/%[0-9a-f]{2}/i.test(entry.name)) continue;
+
+    let decoded;
+    try {
+      decoded = decodeURIComponent(entry.name);
+    } catch {
+      continue;
+    }
+    if (decoded === entry.name) continue;
+
+    const target = path.join(path.dirname(entry.full), decoded);
+    if (fs.existsSync(target)) {
+      throw new Error(`MSIX path decode collision: ${entry.full} -> ${target}`);
+    }
+    fs.renameSync(entry.full, target);
+    renamed++;
+  }
+
+  return renamed;
+}
+
 function countFiles(dir) {
   let n = 0;
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -145,7 +221,7 @@ async function getWindowsVersion() {
   if (!info.categoryId) throw new Error("No CategoryID");
   const pkgs = await msstore.getFileList(cookie, info.categoryId, "Retail");
   if (pkgs.length === 0) throw new Error("No packages");
-  const pkg = pkgs[0];
+  const pkg = msstore.selectArchitecturePackage(pkgs, "x64");
   const url = await msstore.getDownloadUrl(pkg.updateID, pkg.revisionNumber, "Retail", pkg.digest);
   const verMatch = pkg.name.match(/_(\d+\.\d+\.\d+(?:\.\d+)?)_/);
   return { version: verMatch?.[1] || "unknown", url, packageName: pkg.name };
@@ -163,6 +239,9 @@ async function syncMac(variant, appcastUrl, destDir) {
   const zipPath = path.join(TEMP_DIR, `Codex-${variant}-${info.version}.zip`);
   const extractDir = path.join(TEMP_DIR, `${variant}-extract`);
 
+  if (refreshCachedArchive(zipPath, REFRESH_DOWNLOAD)) {
+    console.log(`   [refresh] removed cached archive ${zipPath}`);
+  }
   if (!fs.existsSync(zipPath)) {
     curlDownload(info.url, zipPath, label);
   } else {
@@ -191,6 +270,9 @@ async function syncWin(destDir) {
   const msixPath = path.join(TEMP_DIR, info.packageName || `codex-win-${info.version}.msix`);
   const extractDir = path.join(TEMP_DIR, "win-extract");
 
+  if (refreshCachedArchive(msixPath, REFRESH_DOWNLOAD)) {
+    console.log(`   [refresh] removed cached archive ${msixPath}`);
+  }
   if (!fs.existsSync(msixPath)) {
     curlDownload(info.url, msixPath, "Windows MSIX");
   } else {
@@ -200,6 +282,11 @@ async function syncWin(destDir) {
   console.log("   [unzip]");
   clearDir(extractDir);
   extractArchive(msixPath, extractDir);
+
+  const decodedPathCount = decodeMsixPaths(extractDir);
+  if (decodedPathCount > 0) {
+    console.log(`   [msix paths] decoded ${decodedPathCount} entries`);
+  }
 
   const resourcesDir = path.join(extractDir, "app", "resources");
   if (!fs.existsSync(resourcesDir)) {
@@ -269,6 +356,7 @@ async function main() {
   fs.mkdirSync(TEMP_DIR, { recursive: true });
 
   const results = {};
+  const failures = [];
 
   // Detect versions
   if (!SKIP_MAC) {
@@ -276,13 +364,19 @@ async function main() {
       const arm64Info = await getAppcastVersion(APPCAST_ARM64);
       console.log(`\n   mac-arm64: ${arm64Info.version} (build ${arm64Info.build})`);
       results["mac-arm64"] = arm64Info;
-    } catch (e) { console.error(`   [x] mac-arm64 check: ${e.message}`); }
+    } catch (e) {
+      failures.push(`mac-arm64 check: ${e.message}`);
+      console.error(`   [x] mac-arm64 check: ${e.message}`);
+    }
 
     try {
       const x64Info = await getAppcastVersion(APPCAST_X64);
       console.log(`   mac-x64:   ${x64Info.version} (build ${x64Info.build})`);
       results["mac-x64"] = x64Info;
-    } catch (e) { console.error(`   [x] mac-x64 check: ${e.message}`); }
+    } catch (e) {
+      failures.push(`mac-x64 check: ${e.message}`);
+      console.error(`   [x] mac-x64 check: ${e.message}`);
+    }
   }
 
   if (!SKIP_WIN) {
@@ -290,11 +384,15 @@ async function main() {
       const winInfo = await getWindowsVersion();
       console.log(`   win:       ${winInfo.version}`);
       results.win = winInfo;
-    } catch (e) { console.error(`   [x] win check: ${e.message}`); }
+    } catch (e) {
+      failures.push(`win check: ${e.message}`);
+      console.error(`   [x] win check: ${e.message}`);
+    }
   }
 
   if (CHECK_ONLY) {
     console.log("\n== Check only, skipping download ==");
+    if (failures.length > 0) throw new Error(failures.join("\n"));
     return;
   }
 
@@ -302,22 +400,38 @@ async function main() {
   if (!SKIP_MAC && results["mac-arm64"]) {
     try {
       results["mac-arm64"] = await syncMac("arm64", APPCAST_ARM64, path.join(SRC_DIR, "mac-arm64"));
-    } catch (e) { console.error(`   [x] mac-arm64: ${e.message}`); }
+    } catch (e) {
+      failures.push(`mac-arm64 sync: ${e.message}`);
+      console.error(`   [x] mac-arm64: ${e.message}`);
+    }
   }
   if (!SKIP_MAC && results["mac-x64"]) {
     try {
       results["mac-x64"] = await syncMac("x64", APPCAST_X64, path.join(SRC_DIR, "mac-x64"));
-    } catch (e) { console.error(`   [x] mac-x64: ${e.message}`); }
+    } catch (e) {
+      failures.push(`mac-x64 sync: ${e.message}`);
+      console.error(`   [x] mac-x64: ${e.message}`);
+    }
   }
   if (!SKIP_WIN && results.win) {
     try {
       results.win = await syncWin(path.join(SRC_DIR, "win"));
-    } catch (e) { console.error(`   [x] win: ${e.message}`); }
+    } catch (e) {
+      failures.push(`win sync: ${e.message}`);
+      console.error(`   [x] win: ${e.message}`);
+    }
   }
+
+  if (failures.length > 0) throw new Error(failures.join("\n"));
 
   const saved = loadVersions();
   for (const [key, info] of Object.entries(results)) {
-    saved[key] = { version: info.version, build: info.build || "", checkedAt: new Date().toISOString() };
+    saved[key] = {
+      version: info.version,
+      build: info.build || "",
+      checkedAt: new Date().toISOString(),
+      cacheKey: OPTIONS.cacheKey,
+    };
   }
   saveVersions(saved);
 
@@ -327,4 +441,8 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(`\n[x] ${e.message}`); process.exit(1); });
+module.exports = { getSyncCacheDir, parseSyncOptions, refreshCachedArchive };
+
+if (require.main === module) {
+  main().catch((e) => { console.error(`\n[x] ${e.message}`); process.exit(1); });
+}

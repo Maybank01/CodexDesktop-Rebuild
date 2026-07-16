@@ -7,25 +7,33 @@
  *   node scripts/patch-all.js unix         # Patch unix only
  *   node scripts/patch-all.js win          # Patch win only
  *   node scripts/patch-all.js --check      # Dry-run all
+ *   node scripts/patch-all.js win --allow-noop # Re-check an already patched tree
  */
 const { execFileSync } = require("child_process");
 const path = require("path");
 
 const PATCHES = [
   "patch-i18n.js",
-  "patch-copyright.js",
-  "patch-devtools.js",
   "patch-fast-mode.js",
+  "patch-model-list-filter.js",
   "patch-plugin-auth.js",
   "patch-updater.js",
-  "patch-archive-delete.js",
 ];
+
+function getPassArgs(args) {
+  const platform = args.find((a) => ["mac-arm64", "mac-x64", "win", "unix"].includes(a));
+  const allowNoop = args.includes("--allow-noop");
+  const extra = args.filter((a) => a.startsWith("--") && a !== "--allow-noop");
+  return [
+    ...(platform ? [platform] : []),
+    ...extra,
+    ...(!allowNoop ? ["--require-change"] : []),
+  ];
+}
 
 function main() {
   const args = process.argv.slice(2);
-  const platform = args.find((a) => ["mac-arm64", "mac-x64", "win", "unix"].includes(a));
-  const extra = args.filter((a) => a.startsWith("--"));
-  const passArgs = [...(platform ? [platform] : []), ...extra];
+  const passArgs = getPassArgs(args);
 
   let failed = 0;
 
@@ -46,4 +54,6 @@ function main() {
   if (failed > 0) process.exit(1);
 }
 
-main();
+module.exports = { PATCHES, getPassArgs };
+
+if (require.main === module) main();

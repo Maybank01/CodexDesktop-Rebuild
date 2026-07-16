@@ -187,16 +187,22 @@ jobs:
   # Bump version + tag + release
   # ──────────────────────────────────────────────
   release:
-    needs: [build-mac, build-windows, build-linux]
-    if: always() && needs.check.result == 'success'
+    needs: [check, build-mac, build-windows, build-linux]
+    if: >-
+      always() &&
+      needs.check.result == 'success' &&
+      needs.build-mac.result == 'success' &&
+      needs.build-windows.result == 'success' &&
+      needs.build-linux.result == 'success'
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -209,6 +215,7 @@ jobs:
       - name: Get upstream version and tag
         id: version
         run: |
+          echo "changed=false" >> "$GITHUB_OUTPUT"
           RESULT=$(node scripts/check-update.js --json --force)
           MAC_ARM64=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const j=JSON.parse(d);console.log(j.platforms?.['macOS-arm64']?.version||'')}catch{console.log('')}})")
           MAC_X64=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const j=JSON.parse(d);console.log(j.platforms?.['macOS-x64']?.version||'')}catch{console.log('')}})")
@@ -237,6 +244,13 @@ jobs:
           git commit -m "Bump version to ${VERSION}"
           git tag -a "v${VERSION}" -m "Codex ${VERSION}"
           git push origin HEAD --tags
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch controlled signed macOS Shell build
+        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run macos-components.yml --ref master -f signing_mode=required
 
       - name: Download all artifacts
         uses: actions/download-artifact@v7
@@ -247,7 +261,7 @@ jobs:
         run: ls -lhR artifacts/
 
       - name: Create Release
-        if: steps.version.outputs.version != ''
+        if: steps.version.outputs.changed == 'true'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.version.outputs.version }}

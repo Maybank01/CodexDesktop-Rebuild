@@ -96,22 +96,34 @@ function locateTargets(platform) {
 
 function main() {
   const args = process.argv.slice(2);
+  const isCheck = args.includes("--check");
+  const requireChange = args.includes("--require-change");
   const platform = args.find((a) => ["mac-arm64", "mac-x64", "win"].includes(a));
 
   const targets = locateTargets(platform);
   if (targets.length === 0) {
+    if (requireChange) throw new Error("Required updater targets were not found");
     console.log("  [ok] No updater targets found");
     return;
   }
 
+  let totalMatched = 0;
   for (const bundle of targets) {
     console.log(`  [${bundle.platform}] ${relPath(bundle.path)}`);
     const source = fs.readFileSync(bundle.path, "utf-8");
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
     const patches = collectPatches(ast, source);
+    totalMatched += patches.length;
 
     if (patches.length === 0) {
       console.log("    [ok] Already patched or no match");
+      continue;
+    }
+
+    if (isCheck) {
+      for (const p of patches) {
+        console.log(`    [?] [${p.id}] ${p.original} -> !1`);
+      }
       continue;
     }
 
@@ -124,6 +136,9 @@ function main() {
 
     fs.writeFileSync(bundle.path, code, "utf-8");
     console.log(`    [ok] ${patches.length} updater methods disabled`);
+  }
+  if (requireChange && totalMatched === 0) {
+    throw new Error("Required updater patch matched zero locations");
   }
 }
 

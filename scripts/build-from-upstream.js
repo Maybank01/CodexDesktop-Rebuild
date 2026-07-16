@@ -8,15 +8,22 @@
  * Usage:
  *   node scripts/build-from-upstream.js --platform mac-arm64
  *   node scripts/build-from-upstream.js --platform mac-x64
- *   node scripts/build-from-upstream.js --platform win
+ *   node scripts/build-from-upstream.js --platform win [--artifact shell|composite]
  */
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execFileSync, execSync, spawnSync } = require("child_process");
+const { prepareShellTree } = require("./windows-component-util");
+const {
+  prepareMacShellTree,
+  resolveMacExtractDirectory,
+  validateMacShellTree,
+} = require("./macos-component-util");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
 const OUT_DIR = path.join(PROJECT_ROOT, "out");
+const CODEX_RUNTIME_SOURCE = (process.env.CODEX_RUNTIME_SOURCE || "upstream").toLowerCase();
 
 const TARGET_TRIPLE_MAP = {
   "mac-arm64": "aarch64-apple-darwin",
@@ -47,6 +54,84 @@ function copyRecursive(src, dest) {
     }
   }
   return count;
+}
+
+function createZip(sourceDir, zipPath) {
+  let lastError;
+  for (const bin of ["7zz", "7z"]) {
+    try {
+      if (fs.existsSync(zipPath)) fs.rmSync(zipPath);
+      execFileSync(bin, ["a", "-tzip", "-mx=5", zipPath, "."], {
+        cwd: sourceDir,
+        stdio: "inherit",
+      });
+      return bin;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`Neither 7zz nor 7z could create the archive: ${lastError?.message || "unknown error"}`);
+}
+
+function createMacZip(sourceDir, zipPath) {
+  if (fs.existsSync(zipPath)) fs.rmSync(zipPath, { force: true });
+  execFileSync("ditto", ["-c", "-k", "--sequesterRsrc", "--rsrc", sourceDir, zipPath], {
+    stdio: "inherit",
+  });
+}
+
+function readMacSigningAuthority(appPath) {
+  const result = spawnSync("codesign", ["--display", "--verbose=4", appPath], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.status !== 0) return "unsigned";
+  const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+  return output.match(/^Authority=(.+)$/m)?.[1]?.trim() || "ad-hoc";
+}
+
+function signMacApp(appPath) {
+  const identity = String(process.env.APPLE_SIGNING_IDENTITY || "").trim();
+  if (!identity) {
+    console.log("   [codesign] ad-hoc signing (internal probe only)");
+    execFileSync("codesign", ["--sign", "-", "--force", "--deep", appPath], { stdio: "inherit" });
+  } else {
+    console.log("   [codesign] Developer ID signing with electron-osx-sign");
+    const signer = path.join(PROJECT_ROOT, "node_modules", ".bin", "electron-osx-sign");
+    execFileSync(signer, [
+      appPath,
+      `--identity=${identity}`,
+      "--platform=darwin",
+      "--type=distribution",
+      "--no-pre-embed-provisioning-profile",
+    ], { stdio: "inherit" });
+  }
+  execFileSync("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath], {
+    stdio: "inherit",
+  });
+  return readMacSigningAuthority(appPath);
+}
+
+function createWindowsCompatibilityEntrypoint(appDir) {
+  const officialEntrypoint = path.join(appDir, "ChatGPT.exe");
+  const compatibilityEntrypoint = path.join(appDir, "Codex.exe");
+  const upstreamLauncherBackup = path.join(appDir, "Codex-upstream-launcher.bin");
+
+  if (!fs.existsSync(officialEntrypoint)) return;
+
+  if (fs.existsSync(compatibilityEntrypoint)) {
+    fs.copyFileSync(compatibilityEntrypoint, upstreamLauncherBackup);
+  }
+  fs.copyFileSync(officialEntrypoint, compatibilityEntrypoint);
+  console.log("   [entrypoint] Codex.exe mapped to the official ChatGPT.exe runtime");
+}
+
+function shouldReplaceCodexRuntime() {
+  if (CODEX_RUNTIME_SOURCE === "upstream") return false;
+  if (CODEX_RUNTIME_SOURCE === "cometix") return true;
+  throw new Error(
+    `Unsupported CODEX_RUNTIME_SOURCE=${CODEX_RUNTIME_SOURCE}; expected upstream or cometix`,
+  );
 }
 
 function resolveCodexVendor(platform) {
@@ -102,7 +187,7 @@ function resolveCodexVendor(platform) {
 
 // ─── macOS build ────────────────────────────────────────────────
 
-function buildMac(platform) {
+function buildMac(platform, { artifact, cacheKey }) {
   const platformDir = path.join(SRC_DIR, platform);
   const asarDir = path.join(platformDir, "_asar");
 
@@ -112,9 +197,8 @@ function buildMac(platform) {
   }
 
   // 1. Find the .app in the ZIP extract cache
-  const tempDir = path.join(require("os").tmpdir(), "codex-sync");
   const variant = platform === "mac-arm64" ? "arm64" : "x64";
-  const extractDir = path.join(tempDir, `${variant}-extract`);
+  const extractDir = resolveMacExtractDirectory(require("os").tmpdir(), cacheKey, variant);
 
   // Find Codex.app
   let appPath = null;
@@ -161,20 +245,39 @@ function buildMac(platform) {
   try { execSync(`codesign --remove-signature "${outApp}"`, { stdio: "pipe" }); } catch {}
   try { execSync(`xattr -rd com.apple.quarantine "${outApp}"`, { stdio: "pipe" }); } catch {}
 
-  // 6. Replace codex CLI
-  replaceCodex(platform, resourcesDir, "codex");
-
-  // 7. Ad-hoc re-sign (prevents "damaged app" Gatekeeper error)
-  console.log("   [codesign] ad-hoc signing");
-  try {
-    execSync(`codesign --sign - --force --deep "${outApp}"`, { stdio: "pipe" });
-    console.log("   [ok] ad-hoc signed");
-  } catch (e) {
-    console.log(`   [!] ad-hoc sign failed: ${e.message}`);
+  const version = getVersion(asarDir);
+  const arch = platform === "mac-arm64" ? "arm64" : "x64";
+  const syncState = getRecordedMacSyncState(platform);
+  if (artifact === "shell") {
+    prepareMacShellTree(outAppDir, version, arch, {
+      sourceBuildVersion: syncState.build,
+      sourcePackageVersion: syncState.version,
+    });
+    const authority = signMacApp(outApp);
+    prepareMacShellTree(outAppDir, version, arch, {
+      codeSignatureAuthority: authority,
+      sourceBuildVersion: syncState.build,
+      sourcePackageVersion: syncState.version,
+    });
+    validateMacShellTree(outAppDir);
+    const zipName = `Codex-Desktop-Shell-mac-${arch}-${version}.zip`;
+    const zipPath = path.join(OUT_DIR, zipName);
+    console.log(`   [zip] ${zipName}`);
+    createMacZip(outAppDir, zipPath);
+    console.log(`   [ok] ${zipPath} (${(fs.statSync(zipPath).size / 1048576).toFixed(1)} MB)`);
+    return;
   }
 
-  // 8. Create DMG
-  const version = getVersion(asarDir);
+  // Composite compatibility packages keep the official upstream Core unless
+  // an explicit Cometix compatibility build was requested.
+  if (shouldReplaceCodexRuntime()) {
+    replaceCodex(platform, resourcesDir, "codex");
+  } else {
+    console.log("   [codex] keeping official upstream runtime");
+  }
+  signMacApp(outApp);
+
+  // Create the legacy full-app DMG only for composite compatibility builds.
   const dmgName = `Codex-${platform}-${version}.dmg`;
   const dmgPath = path.join(OUT_DIR, dmgName);
   console.log(`   [dmg] ${dmgName}`);
@@ -185,7 +288,7 @@ function buildMac(platform) {
 
 // ─── Windows build ──────────────────────────────────────────────
 
-function buildWin(platform) {
+function buildWin(platform, { artifact, cacheKey, sourcePackageVersion }) {
   const platformDir = path.join(SRC_DIR, platform);
   const asarDir = path.join(platformDir, "_asar");
 
@@ -195,7 +298,9 @@ function buildWin(platform) {
   }
 
   // Windows: use the MSIX extract cache
-  const tempDir = path.join(require("os").tmpdir(), "codex-sync");
+  const tempDir = cacheKey
+    ? path.join(require("os").tmpdir(), "codex-sync", cacheKey)
+    : path.join(require("os").tmpdir(), "codex-sync");
   const extractDir = path.join(tempDir, "win-extract");
   const appDir = path.join(extractDir, "app");
 
@@ -227,24 +332,46 @@ function buildWin(platform) {
   console.log(`   [integrity] new hash: ${newHash.slice(0, 16)}...`);
 
   if (oldHash !== newHash) {
-    // Find Codex.exe in app root
-    const exePath = path.join(outApp, "Codex.exe");
-    if (fs.existsSync(exePath)) {
-      patchExeHash(exePath, oldHash, newHash);
-    } else {
-      console.log("   [!] Codex.exe not found for hash patching");
+    // Newer MSIX packages launch ChatGPT.exe; older ones used Codex.exe.
+    const exePaths = ["ChatGPT.exe", "Codex.exe"]
+      .map((name) => path.join(outApp, name))
+      .filter((exePath) => fs.existsSync(exePath));
+    const patched = exePaths.some((exePath) => patchExeHash(exePath, oldHash, newHash));
+    if (!patched) {
+      console.log("   [integrity] no embedded ASAR hash (runtime patch not required)");
     }
   }
 
-  // Replace codex CLI
-  replaceCodex(platform, resourcesDir, "codex.exe");
+  // AgentRouter Client and older portable launchers resolve Codex.exe. The
+  // current Microsoft Store package declares ChatGPT.exe as its real desktop
+  // entrypoint, while its Codex.exe helper exits outside the MSIX identity.
+  createWindowsCompatibilityEntrypoint(outApp);
+
+  const version = getVersion(asarDir);
+
+  // A Shell artifact deliberately has no Core entrypoint. It cannot be
+  // activated until AgentRouter Client composes it with a verified Core.
+  if (artifact === "shell") {
+    prepareShellTree(outApp, version, { sourcePackageVersion });
+    console.log("   [component] removed resources/codex.exe and wrote agentrouter-shell.json");
+  } else {
+    // Keep the official Store runtime so the desktop model catalog and CLI stay
+    // on the same release. Opt in to Cometix only for compatibility testing.
+    if (shouldReplaceCodexRuntime()) {
+      replaceCodex(platform, resourcesDir, "codex.exe");
+    } else {
+      console.log("   [codex] keeping official upstream runtime");
+    }
+  }
 
   // Create ZIP
-  const version = getVersion(asarDir);
-  const zipName = `Codex-win-x64-${version}.zip`;
+  const zipName = artifact === "shell"
+    ? `Codex-Desktop-Shell-win-x64-${version}.zip`
+    : `Codex-win-x64-${version}.zip`;
   const zipPath = path.join(OUT_DIR, zipName);
   console.log(`   [zip] ${zipName}`);
-  execSync(`7zz a -tzip -mx=5 "${zipPath}" .`, { cwd: outApp });
+  const archiver = createZip(outApp, zipPath);
+  console.log(`   [zip] created with ${archiver}`);
 
   const sizeMB = (fs.statSync(zipPath).size / 1048576).toFixed(1);
   console.log(`   [ok] ${zipPath} (${sizeMB} MB)`);
@@ -264,13 +391,11 @@ function patchExeHash(exePath, oldHash, newHash) {
   const buf = fs.readFileSync(exePath);
   const oldBuf = Buffer.from(oldHash, "ascii");
   const idx = buf.indexOf(oldBuf);
-  if (idx < 0) {
-    console.log("   [!] old hash not found in exe");
-    return;
-  }
+  if (idx < 0) return false;
   Buffer.from(newHash, "ascii").copy(buf, idx);
   fs.writeFileSync(exePath, buf);
-  console.log(`   [integrity] exe hash patched at offset ${idx}`);
+  console.log(`   [integrity] ${path.basename(exePath)} hash patched at offset ${idx}`);
+  return true;
 }
 
 function updateAsarIntegrity(asarPath, infoPlistPath) {
@@ -310,25 +435,85 @@ function getVersion(asarDir) {
   }
 }
 
+function getRecordedWindowsSyncState() {
+  const versionsPath = path.join(__dirname, ".versions.json");
+  try {
+    const versions = JSON.parse(fs.readFileSync(versionsPath, "utf-8"));
+    return {
+      sourcePackageVersion: String(versions.win?.version || "").trim() || null,
+      cacheKey: String(versions.win?.cacheKey || "").trim() || null,
+    };
+  } catch {
+    return { sourcePackageVersion: null, cacheKey: null };
+  }
+}
+
+function getRecordedMacSyncState(platform) {
+  const versionsPath = path.join(__dirname, ".versions.json");
+  try {
+    const versions = JSON.parse(fs.readFileSync(versionsPath, "utf-8"));
+    const record = versions[platform] || {};
+    return {
+      version: String(record.version || "").trim() || null,
+      build: String(record.build || "").trim() || null,
+      cacheKey: String(record.cacheKey || "").trim() || null,
+    };
+  } catch {
+    return { version: null, build: null, cacheKey: null };
+  }
+}
+
 // ─── Main ───────────────────────────────────────────────────────
 
 function main() {
   const args = process.argv.slice(2);
   const platIdx = args.indexOf("--platform");
   const platform = platIdx !== -1 ? args[platIdx + 1] : null;
+  const artifactIdx = args.indexOf("--artifact");
+  const artifact = artifactIdx !== -1 ? args[artifactIdx + 1] : "composite";
+  const sourceVersionIdx = args.indexOf("--source-package-version");
+  const explicitSourcePackageVersion = sourceVersionIdx !== -1 ? args[sourceVersionIdx + 1] : null;
+  const cacheKeyIdx = args.indexOf("--cache-key");
+  const explicitCacheKey = cacheKeyIdx !== -1 ? args[cacheKeyIdx + 1] : null;
 
   if (!platform || !["mac-arm64", "mac-x64", "win"].includes(platform)) {
-    console.error("[x] Usage: build-from-upstream.js --platform <mac-arm64|mac-x64|win>");
+    console.error("[x] Usage: build-from-upstream.js --platform <mac-arm64|mac-x64|win> [--artifact <shell|composite>]");
+    process.exit(1);
+  }
+  if (!["shell", "composite"].includes(artifact)) {
+    console.error("[x] --artifact must be shell or composite");
+    process.exit(1);
+  }
+  if (sourceVersionIdx !== -1 && (!explicitSourcePackageVersion || explicitSourcePackageVersion.startsWith("--"))) {
+    console.error("[x] --source-package-version requires a value");
+    process.exit(1);
+  }
+  if (cacheKeyIdx !== -1 && (!explicitCacheKey || explicitCacheKey.startsWith("--"))) {
+    console.error("[x] --cache-key requires a value");
+    process.exit(1);
+  }
+  if (explicitCacheKey && !/^[0-9A-Za-z._-]+$/.test(explicitCacheKey)) {
+    console.error("[x] --cache-key may contain only letters, numbers, dot, underscore, and dash");
     process.exit(1);
   }
 
-  console.log(`\n== Build from upstream: ${platform} ==\n`);
+  const recordedSyncState = platform === "win"
+    ? getRecordedWindowsSyncState()
+    : getRecordedMacSyncState(platform);
+  const sourcePackageVersion = explicitSourcePackageVersion || recordedSyncState.sourcePackageVersion;
+  const cacheKey = explicitCacheKey || recordedSyncState.cacheKey;
+  if (platform === "win" && artifact === "shell" && !sourcePackageVersion) {
+    console.error("[x] Shell builds require Windows sourcePackageVersion from sync-upstream or --source-package-version");
+    process.exit(1);
+  }
+
+  console.log(`\n== Build from upstream: ${platform} (${artifact}) ==\n`);
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
   if (platform.startsWith("mac")) {
-    buildMac(platform);
+    buildMac(platform, { artifact, cacheKey });
   } else {
-    buildWin(platform);
+    buildWin(platform, { artifact, cacheKey, sourcePackageVersion });
   }
 }
 
