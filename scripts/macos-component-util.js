@@ -27,6 +27,24 @@ function resolveMacExtractDirectory(tempRoot, cacheKey, arch) {
   );
 }
 
+function findMacDesktopApp(rootDir) {
+  const root = path.resolve(rootDir);
+  if (!fs.existsSync(root)) return null;
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const fullPath = path.join(root, entry.name);
+    if (
+      entry.name.endsWith(".app") &&
+      fs.existsSync(path.join(fullPath, "Contents", "Resources", "app.asar"))
+    ) {
+      return fullPath;
+    }
+    const nested = findMacDesktopApp(fullPath);
+    if (nested) return nested;
+  }
+  return null;
+}
+
 function createMacShellManifest(version, arch, extra = {}) {
   if (!String(version || "").trim()) throw new Error("Shell version is required.");
   return {
@@ -93,6 +111,7 @@ module.exports = {
   DESKTOP_ENTRYPOINT,
   SHELL_MANIFEST_NAME,
   createMacShellManifest,
+  findMacDesktopApp,
   prepareMacShellTree,
   resolveMacExtractDirectory,
   validateMacShellTree,

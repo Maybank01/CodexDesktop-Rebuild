@@ -15,6 +15,7 @@ const path = require("path");
 const { execFileSync, execSync, spawnSync } = require("child_process");
 const { prepareShellTree } = require("./windows-component-util");
 const {
+  findMacDesktopApp,
   prepareMacShellTree,
   resolveMacExtractDirectory,
   validateMacShellTree,
@@ -200,21 +201,12 @@ function buildMac(platform, { artifact, cacheKey }) {
   const variant = platform === "mac-arm64" ? "arm64" : "x64";
   const extractDir = resolveMacExtractDirectory(require("os").tmpdir(), cacheKey, variant);
 
-  // Find Codex.app
-  let appPath = null;
-  if (fs.existsSync(extractDir)) {
-    const findApp = (dir) => {
-      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (e.name === "Codex.app" && e.isDirectory()) return path.join(dir, e.name);
-        if (e.isDirectory()) { const r = findApp(path.join(dir, e.name)); if (r) return r; }
-      }
-      return null;
-    };
-    appPath = findApp(extractDir);
-  }
+  // Upstream has used both Codex.app and ChatGPT.app. Identify the actual
+  // Desktop bundle by its app.asar payload and normalize only our output name.
+  const appPath = findMacDesktopApp(extractDir);
 
   if (!appPath) {
-    console.error(`[x] Codex.app not found in cache. Run sync-upstream first.`);
+    console.error(`[x] Desktop .app with Contents/Resources/app.asar not found in cache. Run sync-upstream first.`);
     process.exit(1);
   }
 

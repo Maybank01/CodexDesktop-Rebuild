@@ -6,10 +6,25 @@ const test = require("node:test");
 const {
   BUNDLED_CORE_ENTRYPOINT,
   DESKTOP_ENTRYPOINT,
+  findMacDesktopApp,
   prepareMacShellTree,
   resolveMacExtractDirectory,
   validateMacShellTree,
 } = require("../macos-component-util");
+
+test("finds an upstream Desktop bundle after the Codex.app to ChatGPT.app rename", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentrouter-mac-upstream-test-"));
+  try {
+    const renamedApp = path.join(root, "nested", "ChatGPT.app");
+    const resources = path.join(renamedApp, "Contents", "Resources");
+    fs.mkdirSync(resources, { recursive: true });
+    fs.writeFileSync(path.join(resources, "app.asar"), "upstream-asar");
+    fs.mkdirSync(path.join(root, "Decoy.app"));
+    assert.equal(findMacDesktopApp(root), renamedApp);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("resolves the same isolated sync cache selected by the workflow", () => {
   assert.equal(
