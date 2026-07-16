@@ -25,6 +25,7 @@ const {
 const { getSyncCacheDir, parseSyncOptions, refreshCachedArchive } = require("../sync-upstream");
 const { PATCHES, getPassArgs } = require("../patch-all");
 const { collectPatches: collectFastModePatches } = require("../patch-fast-mode");
+const { patchModelFilterSource } = require("../patch-model-list-filter");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 
@@ -58,6 +59,22 @@ test("Fast mode patch covers negative and positive ChatGPT auth gates", () => {
       { original: 'n!=="chatgpt"', replacement: "!1" },
       { original: 'a?.authMethod==="chatgpt"', replacement: "!0" },
     ],
+  );
+});
+
+test("model filter patch survives chunk renames and minified identifier changes", () => {
+  for (const original of [
+    "function old(){if(u?n.has(r.model):!r.hidden){return r}}",
+    "function current(){if(l?t.has(n.model):!n.hidden){return n}}",
+  ]) {
+    const patched = patchModelFilterSource(original);
+    assert.equal(patched.changed, true);
+    assert.match(patched.source, /if\(![rn]\.hidden\|\|[ul]&&[nt]\.has\([rn]\.model\)\)\{/);
+    assert.equal(patchModelFilterSource(patched.source).changed, false);
+  }
+  assert.throws(
+    () => patchModelFilterSource("const unrelated = true"),
+    /Expected one unpatched model filter/,
   );
 });
 
