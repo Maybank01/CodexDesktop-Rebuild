@@ -17,9 +17,10 @@ const PROJECT_ROOT = path.join(__dirname, "..");
  *   "assets" -> src/{plat}/webview/assets/
  * @param {RegExp} opts.pattern - Filename regex (e.g. /^index-.*\.js$/)
  * @param {string} [opts.platform] - Restrict to a single platform
+ * @param {boolean} [opts.allMatches=false] - Return every matching file per platform
  * @returns {Array<{platform: string, path: string}>}
  */
-function locateBundles({ dir, pattern, platform }) {
+function locateBundles({ dir, pattern, platform, allMatches = false }) {
   const dirMap = {
     build: (plat) => path.join(SRC_DIR, plat, "_asar", ".vite", "build"),
     assets: (plat) => path.join(SRC_DIR, plat, "_asar", "webview", "assets"),
@@ -66,10 +67,12 @@ function locateBundles({ dir, pattern, platform }) {
     }
 
     // For build dir with multiple matches, prefer hashed variant
-    const target =
-      files.length > 1 ? files.find((f) => f !== "main.js") || files[0] : files[0];
-
-    results.push({ platform: plat, path: path.join(d, target) });
+    const selected = allMatches
+      ? files
+      : [files.length > 1 ? files.find((f) => f !== "main.js") || files[0] : files[0]];
+    for (const target of selected) {
+      results.push({ platform: plat, path: path.join(d, target) });
+    }
   }
 
   return results;
