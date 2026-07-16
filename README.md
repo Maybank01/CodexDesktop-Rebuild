@@ -62,9 +62,16 @@ node scripts/package-windows-core.js --input C:\path\to\codex.exe
 node scripts/compose-windows-runtime.js --shell out\Codex-Desktop-Shell-win-x64-<desktop-version>.zip --core out\Codex-Core-win-x64-<core-version>.zip
 node scripts/verify-windows-components.js --shell <shell.zip> --core <core.zip> --composite <composite.zip>
 
-# After both immutable release URLs are known, generate the Client v2 pointer.
-node scripts/generate-runtime-components-manifest.js --channel dev --minimum-client-version 0.1.75 --published-at 2026-07-12T00:00:00Z --shell <shell.zip> --shell-url <https-url> --core <core.zip> --core-url <https-url> --output out/runtime-components-dev.json
+# After both immutable official component URLs are reachable, generate the
+# Client v2 pointer. Runtime components use download.agentrouter.top as their
+# only source; mirror URL options are rejected.
+node scripts/generate-runtime-components-manifest.js --channel dev --minimum-client-version 0.1.75 --published-at 2026-07-12T00:00:00Z --shell <shell.zip> --shell-url https://download.agentrouter.top/codex/runtime/components/shell/<shell-version>/<shell.zip> --core <core.zip> --core-url https://download.agentrouter.top/codex/runtime/components/core/<core-version>/<core.zip> --output out/runtime-components-dev.json
 ```
+
+The generated Shell and Core artifacts use the fixed
+`source-agentrouter-download` source ID and omit `mirrors`. Third-party hosts,
+wrong component paths, query strings, fragments, userinfo, non-443 ports, and
+all `--*-mirror-url` options fail closed.
 
 `patch-all.js` treats every maintained patch as required and exits non-zero if
 the freshly synchronized upstream tree no longer matches. Use `--allow-noop`

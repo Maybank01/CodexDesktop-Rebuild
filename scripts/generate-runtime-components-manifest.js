@@ -12,6 +12,9 @@ const {
   writeJson,
 } = require("./windows-component-util");
 
+const OFFICIAL_RUNTIME_HOST = "download.agentrouter.top";
+const OFFICIAL_RUNTIME_SOURCE_ID = "source-agentrouter-download";
+
 function option(args, name, { required = false } = {}) {
   const index = args.indexOf(name);
   const value = index === -1 ? null : args[index + 1];
@@ -21,10 +24,38 @@ function option(args, name, { required = false } = {}) {
   return value;
 }
 
-function assertHttps(value, label) {
-  const url = new URL(value);
-  if (url.protocol !== "https:") throw new Error(`${label} must use HTTPS.`);
+function assertOfficialComponentUrl(value, componentKind) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${componentKind} URL must be a valid absolute HTTPS URL.`);
+  }
+  if (url.protocol !== "https:") throw new Error(`${componentKind} URL must use HTTPS.`);
+  if (url.hostname !== OFFICIAL_RUNTIME_HOST) {
+    throw new Error(`${componentKind} URL host must be ${OFFICIAL_RUNTIME_HOST}.`);
+  }
+  if (url.port && url.port !== "443") {
+    throw new Error(`${componentKind} URL must use port 443.`);
+  }
+  if (url.username || url.password) {
+    throw new Error(`${componentKind} URL must not contain userinfo.`);
+  }
+  if (url.search || url.hash) {
+    throw new Error(`${componentKind} URL must not contain a query or fragment.`);
+  }
+  const expectedPrefix = `/codex/runtime/components/${componentKind}/`;
+  if (!url.pathname.startsWith(expectedPrefix) || url.pathname === expectedPrefix) {
+    throw new Error(`${componentKind} URL path must be under ${expectedPrefix}.`);
+  }
   return url.toString();
+}
+
+function rejectMirrorUrlOptions(args) {
+  const mirrorOption = args.find((arg) => /^--.*-mirror-url(?:=|$)/.test(arg));
+  if (mirrorOption) {
+    throw new Error(`${mirrorOption} is not supported; Runtime components use one official source.`);
+  }
 }
 
 function assertGitSha(value) {
@@ -44,29 +75,20 @@ function readComponent(input, validator, manifestName) {
   });
 }
 
-function artifact(archivePath, url, sourceId, mirrorUrl, mirrorSourceId) {
+function artifact(archivePath, url, componentKind) {
   const archive = path.resolve(archivePath);
-  const result = {
+  return {
     name: path.basename(archive),
-    url: assertHttps(url, `${sourceId} URL`),
-    sourceId,
+    url: assertOfficialComponentUrl(url, componentKind),
+    sourceId: OFFICIAL_RUNTIME_SOURCE_ID,
     size: fs.statSync(archive).size,
     sha256: sha256File(archive),
-    mirrors: [],
   };
-  if (mirrorUrl) {
-    result.mirrors.push({
-      url: assertHttps(mirrorUrl, `${mirrorSourceId} URL`),
-      sourceId: mirrorSourceId,
-      name: mirrorSourceId,
-      priority: 20,
-    });
-  }
-  return result;
 }
 
 function main() {
   const args = process.argv.slice(2);
+  rejectMirrorUrlOptions(args);
   const shellPath = path.resolve(option(args, "--shell", { required: true }));
   const corePath = path.resolve(option(args, "--core", { required: true }));
   const shellUrl = option(args, "--shell-url", { required: true });
@@ -95,20 +117,8 @@ function main() {
     core.manifest.upstreamGitSha || option(args, "--core-upstream-git-sha", { required: true }),
   );
   const coreFile = core.manifest.files[0];
-  const shellArtifact = artifact(
-    shellPath,
-    shellUrl,
-    "github-shell-release",
-    option(args, "--shell-mirror-url"),
-    "agentrouter-shell-mirror",
-  );
-  const coreArtifact = artifact(
-    corePath,
-    coreUrl,
-    "github-core-release",
-    option(args, "--core-mirror-url"),
-    "agentrouter-core-mirror",
-  );
+  const shellArtifact = artifact(shellPath, shellUrl, "shell");
+  const coreArtifact = artifact(corePath, coreUrl, "core");
   const id = `windows-x64.shell-${shell.manifest.version}.core-${core.manifest.version}`;
   const manifest = {
     schemaVersion: 2,

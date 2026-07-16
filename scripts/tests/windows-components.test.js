@@ -213,7 +213,7 @@ test("Shell, Core, and test composition obey the two-layer contract", (t) => {
   assert.equal(report.composite.coreVersion, "test-core-1");
 
   const manifestPath = path.join(temp, "runtime-components-dev.json");
-  runScript("generate-runtime-components-manifest.js", [
+  const manifestArgs = [
     "--channel",
     "dev",
     "--minimum-client-version",
@@ -223,24 +223,116 @@ test("Shell, Core, and test composition obey the two-layer contract", (t) => {
     "--shell",
     shellZip,
     "--shell-url",
-    "https://github.example/shell.zip",
+    "https://download.agentrouter.top/codex/runtime/components/shell/26.707.31428/Codex-Desktop-Shell-win-x64-26.707.31428.zip",
     "--core",
     coreZip,
     "--core-url",
-    "https://github.example/core.zip",
+    "https://download.agentrouter.top/codex/runtime/components/core/test-core-1/Codex-Core-win-x64-test-core-1.zip",
     "--compatible-shell-version",
     "26.707.31428",
     "--core-upstream-git-sha",
     "a".repeat(40),
     "--output",
     manifestPath,
-  ]);
+  ];
+  runScript("generate-runtime-components-manifest.js", manifestArgs);
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   assert.equal(manifest.schemaVersion, 2);
   assert.equal(manifest.channel, "dev");
   assert.equal(manifest.compositions[0].shell.version, "26.707.31428");
   assert.equal(manifest.compositions[0].core.version, "test-core-1");
   assert.equal(manifest.compositions[0].minimumClientVersion, "0.1.75");
+  assert.equal(
+    manifest.compositions[0].shell.artifact.url,
+    "https://download.agentrouter.top/codex/runtime/components/shell/26.707.31428/Codex-Desktop-Shell-win-x64-26.707.31428.zip",
+  );
+  assert.equal(
+    manifest.compositions[0].core.artifact.url,
+    "https://download.agentrouter.top/codex/runtime/components/core/test-core-1/Codex-Core-win-x64-test-core-1.zip",
+  );
+  assert.equal(manifest.compositions[0].shell.artifact.sourceId, "source-agentrouter-download");
+  assert.equal(manifest.compositions[0].core.artifact.sourceId, "source-agentrouter-download");
+  assert.equal(Object.hasOwn(manifest.compositions[0].shell.artifact, "mirrors"), false);
+  assert.equal(Object.hasOwn(manifest.compositions[0].core.artifact, "mirrors"), false);
+
+  const invalidCases = [
+    {
+      name: "third-party host",
+      option: "--shell-url",
+      value: "https://example.com/codex/runtime/components/shell/version/shell.zip",
+      error: /shell URL host must be download\.agentrouter\.top/,
+    },
+    {
+      name: "wrong component path",
+      option: "--shell-url",
+      value: "https://download.agentrouter.top/codex/runtime/components/core/version/shell.zip",
+      error: /shell URL path must be under \/codex\/runtime\/components\/shell\//,
+    },
+    {
+      name: "query string",
+      option: "--core-url",
+      value:
+        "https://download.agentrouter.top/codex/runtime/components/core/version/core.zip?download=1",
+      error: /core URL must not contain a query or fragment/,
+    },
+    {
+      name: "fragment",
+      option: "--core-url",
+      value: "https://download.agentrouter.top/codex/runtime/components/core/version/core.zip#asset",
+      error: /core URL must not contain a query or fragment/,
+    },
+    {
+      name: "userinfo",
+      option: "--shell-url",
+      value:
+        "https://user:password@download.agentrouter.top/codex/runtime/components/shell/version/shell.zip",
+      error: /shell URL must not contain userinfo/,
+    },
+    {
+      name: "non-standard port",
+      option: "--core-url",
+      value: "https://download.agentrouter.top:8443/codex/runtime/components/core/version/core.zip",
+      error: /core URL must use port 443/,
+    },
+    {
+      name: "plain HTTP",
+      option: "--shell-url",
+      value: "http://download.agentrouter.top/codex/runtime/components/shell/version/shell.zip",
+      error: /shell URL must use HTTPS/,
+    },
+  ];
+  for (const invalidCase of invalidCases) {
+    const args = [...manifestArgs];
+    args[args.indexOf(invalidCase.option) + 1] = invalidCase.value;
+    const result = spawnSync(
+      process.execPath,
+      [path.join(PROJECT_ROOT, "scripts", "generate-runtime-components-manifest.js"), ...args],
+      { cwd: PROJECT_ROOT, encoding: "utf8", windowsHide: true },
+    );
+    assert.equal(result.status, 1, invalidCase.name);
+    assert.match(`${result.stdout}${result.stderr}`, invalidCase.error, invalidCase.name);
+  }
+
+  for (const mirrorOption of [
+    "--shell-mirror-url",
+    "--regional-mirror-url",
+    "--core-mirror-url=https://download.agentrouter.top/core.zip",
+  ]) {
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(PROJECT_ROOT, "scripts", "generate-runtime-components-manifest.js"),
+        ...manifestArgs,
+        mirrorOption,
+        ...(mirrorOption.includes("=")
+          ? []
+          : ["https://download.agentrouter.top/codex/runtime/components/shell/mirror/shell.zip"]),
+      ],
+      { cwd: PROJECT_ROOT, encoding: "utf8", windowsHide: true },
+    );
+    assert.equal(result.status, 1, mirrorOption);
+    assert.match(`${result.stdout}${result.stderr}`, /is not supported; Runtime components use one official source/);
+  }
 });
 
 test("Core verification rejects any file outside the first-version allowlist", (t) => {
