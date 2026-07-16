@@ -1,0 +1,146 @@
+name: macOS Runtime Components
+
+on:
+  workflow_dispatch:
+    inputs:
+      signing_mode:
+        description: Developer ID is mandatory for publishable components; ad-hoc is an internal probe.
+        required: true
+        default: ad-hoc
+        type: choice
+        options: [ad-hoc, required]
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/macos-components.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/build-from-upstream.js"
+      - "scripts/macos-component-util.js"
+      - "scripts/patch-*.js"
+      - "scripts/sync-upstream.js"
+      - "scripts/verify-macos-components.js"
+    tags:
+      - "agentrouter-shell-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "24"
+
+jobs:
+  component-contract:
+    name: Validate Runtime component contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run test:macos-components
+      - run: npm run test:windows-components
+
+  build-shell:
+    name: Build controlled macOS Shell - ${{ matrix.arch }}
+    needs: component-contract
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            platform: mac-arm64
+            runner: macos-15
+          - arch: x64
+            platform: mac-x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      SIGNING_REQUIRED: ${{ github.ref_type == 'tag' || github.ref == 'refs/heads/master' || inputs.signing_mode == 'required' }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Import Developer ID certificate
+        if: env.SIGNING_REQUIRED == 'true'
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE_BASE64"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          keychain="$RUNNER_TEMP/agentrouter-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/developer-id.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+
+      - name: Sync official upstream Desktop payload
+        run: node scripts/sync-upstream.js --force --skip-win --refresh-download --cache-key "macos-${{ matrix.arch }}-${GITHUB_RUN_ID}"
+
+      - name: Apply required AgentRouter patches
+        run: node scripts/patch-all.js "${{ matrix.platform }}"
+
+      - name: Build signed Shell without bundled Core
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ env.SIGNING_REQUIRED == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+        run: npm run "build:${{ matrix.platform }}-shell" -- --cache-key "macos-${{ matrix.arch }}-${GITHUB_RUN_ID}"
+
+      - name: Verify Shell component and signature
+        run: |
+          set -euo pipefail
+          archive="$(find out -maxdepth 1 -name 'Codex-Desktop-Shell-mac-${{ matrix.arch }}-*.zip' -print -quit)"
+          test -n "$archive"
+          node scripts/verify-macos-components.js --shell "$archive"
+          shasum -a 256 "$archive" > "$archive.sha256"
+
+      - name: Notarize exact Shell archive
+        if: env.SIGNING_REQUIRED == 'true'
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_API_KEY_P8_BASE64"
+          test -n "$APPLE_API_KEY_ID"
+          test -n "$APPLE_API_ISSUER_ID"
+          key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$key"
+          archive="$(find out -maxdepth 1 -name 'Codex-Desktop-Shell-mac-${{ matrix.arch }}-*.zip' -print -quit)"
+          xcrun notarytool submit "$archive" --key "$key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait --output-format json | tee "$RUNNER_TEMP/notary-result.json"
+          node -e 'const r=require(process.argv[1]);if(r.status!=="Accepted")throw new Error(`Notarization failed: ${JSON.stringify(r)}`)' "$RUNNER_TEMP/notary-result.json"
+
+      - name: Upload controlled Shell candidate
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: AgentRouter-CodexDesktop-Shell-mac-${{ matrix.arch }}
+          path: |
+            out/Codex-Desktop-Shell-mac-${{ matrix.arch }}-*.zip
+            out/Codex-Desktop-Shell-mac-${{ matrix.arch }}-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7

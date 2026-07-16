@@ -12,8 +12,13 @@
  */
 const fs = require("fs");
 const path = require("path");
-const { execFileSync, execSync } = require("child_process");
+const { execFileSync, execSync, spawnSync } = require("child_process");
 const { prepareShellTree } = require("./windows-component-util");
+const {
+  prepareMacShellTree,
+  resolveMacExtractDirectory,
+  validateMacShellTree,
+} = require("./macos-component-util");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
@@ -66,6 +71,45 @@ function createZip(sourceDir, zipPath) {
     }
   }
   throw new Error(`Neither 7zz nor 7z could create the archive: ${lastError?.message || "unknown error"}`);
+}
+
+function createMacZip(sourceDir, zipPath) {
+  if (fs.existsSync(zipPath)) fs.rmSync(zipPath, { force: true });
+  execFileSync("ditto", ["-c", "-k", "--sequesterRsrc", "--rsrc", sourceDir, zipPath], {
+    stdio: "inherit",
+  });
+}
+
+function readMacSigningAuthority(appPath) {
+  const result = spawnSync("codesign", ["--display", "--verbose=4", appPath], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.status !== 0) return "unsigned";
+  const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+  return output.match(/^Authority=(.+)$/m)?.[1]?.trim() || "ad-hoc";
+}
+
+function signMacApp(appPath) {
+  const identity = String(process.env.APPLE_SIGNING_IDENTITY || "").trim();
+  if (!identity) {
+    console.log("   [codesign] ad-hoc signing (internal probe only)");
+    execFileSync("codesign", ["--sign", "-", "--force", "--deep", appPath], { stdio: "inherit" });
+  } else {
+    console.log("   [codesign] Developer ID signing with electron-osx-sign");
+    const signer = path.join(PROJECT_ROOT, "node_modules", ".bin", "electron-osx-sign");
+    execFileSync(signer, [
+      appPath,
+      `--identity=${identity}`,
+      "--platform=darwin",
+      "--type=distribution",
+      "--no-pre-embed-provisioning-profile",
+    ], { stdio: "inherit" });
+  }
+  execFileSync("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath], {
+    stdio: "inherit",
+  });
+  return readMacSigningAuthority(appPath);
 }
 
 function createWindowsCompatibilityEntrypoint(appDir) {
@@ -143,7 +187,7 @@ function resolveCodexVendor(platform) {
 
 // ─── macOS build ────────────────────────────────────────────────
 
-function buildMac(platform) {
+function buildMac(platform, { artifact, cacheKey }) {
   const platformDir = path.join(SRC_DIR, platform);
   const asarDir = path.join(platformDir, "_asar");
 
@@ -153,9 +197,8 @@ function buildMac(platform) {
   }
 
   // 1. Find the .app in the ZIP extract cache
-  const tempDir = path.join(require("os").tmpdir(), "codex-sync");
   const variant = platform === "mac-arm64" ? "arm64" : "x64";
-  const extractDir = path.join(tempDir, `${variant}-extract`);
+  const extractDir = resolveMacExtractDirectory(require("os").tmpdir(), cacheKey, variant);
 
   // Find Codex.app
   let appPath = null;
@@ -202,25 +245,39 @@ function buildMac(platform) {
   try { execSync(`codesign --remove-signature "${outApp}"`, { stdio: "pipe" }); } catch {}
   try { execSync(`xattr -rd com.apple.quarantine "${outApp}"`, { stdio: "pipe" }); } catch {}
 
-  // 6. Keep the Codex CLI shipped with the official app by default. A
-  // Cometix replacement remains available as an explicit compatibility mode.
+  const version = getVersion(asarDir);
+  const arch = platform === "mac-arm64" ? "arm64" : "x64";
+  const syncState = getRecordedMacSyncState(platform);
+  if (artifact === "shell") {
+    prepareMacShellTree(outAppDir, version, arch, {
+      sourceBuildVersion: syncState.build,
+      sourcePackageVersion: syncState.version,
+    });
+    const authority = signMacApp(outApp);
+    prepareMacShellTree(outAppDir, version, arch, {
+      codeSignatureAuthority: authority,
+      sourceBuildVersion: syncState.build,
+      sourcePackageVersion: syncState.version,
+    });
+    validateMacShellTree(outAppDir);
+    const zipName = `Codex-Desktop-Shell-mac-${arch}-${version}.zip`;
+    const zipPath = path.join(OUT_DIR, zipName);
+    console.log(`   [zip] ${zipName}`);
+    createMacZip(outAppDir, zipPath);
+    console.log(`   [ok] ${zipPath} (${(fs.statSync(zipPath).size / 1048576).toFixed(1)} MB)`);
+    return;
+  }
+
+  // Composite compatibility packages keep the official upstream Core unless
+  // an explicit Cometix compatibility build was requested.
   if (shouldReplaceCodexRuntime()) {
     replaceCodex(platform, resourcesDir, "codex");
   } else {
     console.log("   [codex] keeping official upstream runtime");
   }
+  signMacApp(outApp);
 
-  // 7. Ad-hoc re-sign (prevents "damaged app" Gatekeeper error)
-  console.log("   [codesign] ad-hoc signing");
-  try {
-    execSync(`codesign --sign - --force --deep "${outApp}"`, { stdio: "pipe" });
-    console.log("   [ok] ad-hoc signed");
-  } catch (e) {
-    console.log(`   [!] ad-hoc sign failed: ${e.message}`);
-  }
-
-  // 8. Create DMG
-  const version = getVersion(asarDir);
+  // Create the legacy full-app DMG only for composite compatibility builds.
   const dmgName = `Codex-${platform}-${version}.dmg`;
   const dmgPath = path.join(OUT_DIR, dmgName);
   console.log(`   [dmg] ${dmgName}`);
@@ -391,6 +448,21 @@ function getRecordedWindowsSyncState() {
   }
 }
 
+function getRecordedMacSyncState(platform) {
+  const versionsPath = path.join(__dirname, ".versions.json");
+  try {
+    const versions = JSON.parse(fs.readFileSync(versionsPath, "utf-8"));
+    const record = versions[platform] || {};
+    return {
+      version: String(record.version || "").trim() || null,
+      build: String(record.build || "").trim() || null,
+      cacheKey: String(record.cacheKey || "").trim() || null,
+    };
+  } catch {
+    return { version: null, build: null, cacheKey: null };
+  }
+}
+
 // ─── Main ───────────────────────────────────────────────────────
 
 function main() {
@@ -412,10 +484,6 @@ function main() {
     console.error("[x] --artifact must be shell or composite");
     process.exit(1);
   }
-  if (platform !== "win" && artifact !== "composite") {
-    console.error("[x] Shell components are currently supported only for Windows");
-    process.exit(1);
-  }
   if (sourceVersionIdx !== -1 && (!explicitSourcePackageVersion || explicitSourcePackageVersion.startsWith("--"))) {
     console.error("[x] --source-package-version requires a value");
     process.exit(1);
@@ -429,7 +497,9 @@ function main() {
     process.exit(1);
   }
 
-  const recordedSyncState = getRecordedWindowsSyncState();
+  const recordedSyncState = platform === "win"
+    ? getRecordedWindowsSyncState()
+    : getRecordedMacSyncState(platform);
   const sourcePackageVersion = explicitSourcePackageVersion || recordedSyncState.sourcePackageVersion;
   const cacheKey = explicitCacheKey || recordedSyncState.cacheKey;
   if (platform === "win" && artifact === "shell" && !sourcePackageVersion) {
@@ -441,7 +511,7 @@ function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
   if (platform.startsWith("mac")) {
-    buildMac(platform);
+    buildMac(platform, { artifact, cacheKey });
   } else {
     buildWin(platform, { artifact, cacheKey, sourcePackageVersion });
   }
