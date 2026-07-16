@@ -113,6 +113,35 @@ function signMacApp(appPath) {
   return readMacSigningAuthority(appPath);
 }
 
+function normalizeMacBundleEntrypoint(appPath, adapters = {}) {
+  const infoPlist = path.join(appPath, "Contents", "Info.plist");
+  const readExecutableName = adapters.readExecutableName || (() =>
+    execFileSync("plutil", ["-extract", "CFBundleExecutable", "raw", infoPlist], {
+      encoding: "utf8",
+    }).trim());
+  const writeExecutableName = adapters.writeExecutableName || ((name) =>
+    execFileSync("plutil", ["-replace", "CFBundleExecutable", "-string", name, infoPlist]));
+  const currentName = readExecutableName();
+  if (!currentName || path.basename(currentName) !== currentName) {
+    throw new Error(`Unsafe CFBundleExecutable value: ${currentName}`);
+  }
+  const executableDir = path.join(appPath, "Contents", "MacOS");
+  const currentPath = path.join(executableDir, currentName);
+  const normalizedPath = path.join(executableDir, "Codex");
+  if (!fs.statSync(currentPath).isFile()) {
+    throw new Error(`macOS bundle executable is missing: ${currentPath}`);
+  }
+  if (currentName !== "Codex") {
+    if (fs.existsSync(normalizedPath)) {
+      throw new Error(`Cannot normalize macOS entrypoint because ${normalizedPath} already exists`);
+    }
+    fs.renameSync(currentPath, normalizedPath);
+    writeExecutableName("Codex");
+    console.log(`   [entrypoint] ${currentName} normalized to Codex`);
+  }
+  return normalizedPath;
+}
+
 function createWindowsCompatibilityEntrypoint(appDir) {
   const officialEntrypoint = path.join(appDir, "ChatGPT.exe");
   const compatibilityEntrypoint = path.join(appDir, "Codex.exe");
@@ -236,6 +265,7 @@ function buildMac(platform, { artifact, cacheKey }) {
   console.log("   [codesign] removing original signature");
   try { execSync(`codesign --remove-signature "${outApp}"`, { stdio: "pipe" }); } catch {}
   try { execSync(`xattr -rd com.apple.quarantine "${outApp}"`, { stdio: "pipe" }); } catch {}
+  normalizeMacBundleEntrypoint(outApp);
 
   const version = getVersion(asarDir);
   const arch = platform === "mac-arm64" ? "arm64" : "x64";
@@ -509,4 +539,6 @@ function main() {
   }
 }
 
-main();
+module.exports = { normalizeMacBundleEntrypoint };
+
+if (require.main === module) main();

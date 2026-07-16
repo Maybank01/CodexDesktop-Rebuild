@@ -11,6 +11,28 @@ const {
   resolveMacExtractDirectory,
   validateMacShellTree,
 } = require("../macos-component-util");
+const { normalizeMacBundleEntrypoint } = require("../build-from-upstream");
+
+test("normalizes the renamed upstream executable to a stable Codex entrypoint", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentrouter-mac-entrypoint-test-"));
+  try {
+    const app = path.join(root, "Codex.app");
+    const executableDir = path.join(app, "Contents", "MacOS");
+    fs.mkdirSync(executableDir, { recursive: true });
+    fs.writeFileSync(path.join(executableDir, "ChatGPT"), "desktop-shell");
+    let recordedExecutable = null;
+    const result = normalizeMacBundleEntrypoint(app, {
+      readExecutableName: () => "ChatGPT",
+      writeExecutableName: (name) => { recordedExecutable = name; },
+    });
+    assert.equal(result, path.join(executableDir, "Codex"));
+    assert.equal(recordedExecutable, "Codex");
+    assert.equal(fs.existsSync(path.join(executableDir, "ChatGPT")), false);
+    assert.equal(fs.readFileSync(result, "utf8"), "desktop-shell");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("finds an upstream Desktop bundle after the Codex.app to ChatGPT.app rename", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentrouter-mac-upstream-test-"));
