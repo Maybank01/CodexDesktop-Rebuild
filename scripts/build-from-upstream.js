@@ -93,6 +93,7 @@ function readMacSigningAuthority(appPath) {
 
 function signMacApp(appPath) {
   const identity = String(process.env.APPLE_SIGNING_IDENTITY || "").trim();
+  const keychain = String(process.env.APPLE_SIGNING_KEYCHAIN || "").trim();
   if (!identity) {
     console.log("   [codesign] ad-hoc signing (internal probe only)");
     execFileSync("codesign", ["--sign", "-", "--force", "--deep", appPath], { stdio: "inherit" });
@@ -102,6 +103,7 @@ function signMacApp(appPath) {
     execFileSync(signer, [
       appPath,
       `--identity=${identity}`,
+      ...(keychain ? [`--keychain=${keychain}`] : []),
       "--platform=darwin",
       "--type=distribution",
       "--no-pre-embed-provisioning-profile",

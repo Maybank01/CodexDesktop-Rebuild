@@ -98,6 +98,10 @@ jobs:
           security import "$RUNNER_TEMP/developer-id.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security list-keychains -d user -s "$keychain"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          signing_identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application/ {print $2; exit}')"
+          test -n "$signing_identity"
+          echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+          echo "APPLE_SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
       - name: Sync official upstream Desktop payload
         run: node scripts/sync-upstream.js --force --skip-win --refresh-download --cache-key "macos-${{ matrix.arch }}-${GITHUB_RUN_ID}"
@@ -106,8 +110,6 @@ jobs:
         run: node scripts/patch-all.js "${{ matrix.platform }}"
 
       - name: Build signed Shell without bundled Core
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ env.SIGNING_REQUIRED == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
         run: npm run "build:${{ matrix.platform }}-shell" -- --cache-key "macos-${{ matrix.arch }}-${GITHUB_RUN_ID}"
 
       - name: Verify Shell component and signature
