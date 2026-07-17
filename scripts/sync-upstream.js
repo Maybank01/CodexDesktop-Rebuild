@@ -181,12 +181,12 @@ function verifyMacSourceArchive(filePath, variant, lock = MAC_SOURCE_LOCK) {
 function extractArchive(archive, dest) {
   if (process.platform === "darwin" && archive.endsWith(".zip")) {
     // ditto preserves macOS symlinks + resource forks (required for .app)
-    execSync(`ditto -xk "${archive}" "${dest}"`);
+    execFileSync("ditto", ["-xk", archive, dest], { stdio: "inherit" });
   } else {
     // 7zz for Windows MSIX and Linux (symlinks don't matter — only ASAR content used)
     for (const bin of ["7zz", "7z"]) {
       try {
-        execSync(`${bin} x -y -o"${dest}" "${archive}"`, { stdio: "pipe" });
+        execFileSync(bin, ["x", "-y", `-o${dest}`, archive], { stdio: "pipe" });
         return;
       } catch {
         if (fs.readdirSync(dest).length > 0) return;
@@ -391,7 +391,8 @@ function assembleOutput(resourcesDir, destDir, label) {
   // 1. Extract app.asar → _asar/ (for patching)
   const asarDest = path.join(destDir, "_asar");
   console.log("   [asar extract] -> _asar/");
-  execSync(`npx asar extract "${asarPath}" "${asarDest}"`);
+  const npxExecutable = process.platform === "win32" ? "npx.cmd" : "npx";
+  execFileSync(npxExecutable, ["asar", "extract", asarPath, asarDest], { stdio: "inherit" });
 
   // 2. Copy app.asar.unpacked/ as-is (native modules)
   const unpackedSrc = path.join(resourcesDir, "app.asar.unpacked");
