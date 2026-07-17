@@ -63,7 +63,7 @@ jobs:
             platform: mac-x64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       SIGNING_REQUIRED: ${{ github.ref_type == 'tag' || github.ref == 'refs/heads/master' || inputs.signing_mode == 'required' }}
 
@@ -120,7 +120,7 @@ jobs:
           node scripts/verify-macos-components.js --shell "$archive"
           shasum -a 256 "$archive" > "$archive.sha256"
 
-      - name: Notarize exact Shell archive
+      - name: Notarize staple and re-notarize exact Shell archive
         if: env.SIGNING_REQUIRED == 'true'
         env:
           APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
@@ -134,8 +134,60 @@ jobs:
           key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
           printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$key"
           archive="$(find out -maxdepth 1 -name 'Codex-Desktop-Shell-mac-${{ matrix.arch }}-*.zip' -print -quit)"
-          xcrun notarytool submit "$archive" --key "$key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait --output-format json | tee "$RUNNER_TEMP/notary-result.json"
-          node -e 'const r=require(process.argv[1]);if(r.status!=="Accepted")throw new Error(`Notarization failed: ${JSON.stringify(r)}`)' "$RUNNER_TEMP/notary-result.json"
+          test -n "$archive"
+
+          xcrun notarytool submit "$archive" \
+            --key "$key" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait \
+            --output-format json \
+            | tee "$RUNNER_TEMP/notary-before-staple.json"
+          node -e 'const r=require(process.argv[1]);if(r.status!=="Accepted")throw new Error(`Initial notarization failed: ${JSON.stringify(r)}`)' "$RUNNER_TEMP/notary-before-staple.json"
+
+          staple_root="$RUNNER_TEMP/agentrouter-shell-staple-${{ matrix.arch }}"
+          final_verify_root="$RUNNER_TEMP/agentrouter-shell-final-${{ matrix.arch }}"
+          for temporary_path in "$staple_root" "$final_verify_root"; do
+            case "$temporary_path" in
+              "$RUNNER_TEMP"/*) rm -rf -- "$temporary_path" ;;
+              *)
+                echo "::error::Refusing to clean a path outside RUNNER_TEMP: $temporary_path"
+                exit 1
+                ;;
+            esac
+          done
+          mkdir -p "$staple_root" "$final_verify_root"
+          ditto -x -k "$archive" "$staple_root"
+          app="$staple_root/Codex.app"
+          test -d "$app"
+          test -f "$staple_root/agentrouter-shell.json"
+          xcrun stapler staple -v "$app"
+          xcrun stapler validate -v "$app"
+          codesign --verify --deep --strict --verbose=4 "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+
+          final_archive="$RUNNER_TEMP/$(basename "$archive").stapled.zip"
+          rm -f -- "$final_archive"
+          ditto -c -k --sequesterRsrc --rsrc "$staple_root" "$final_archive"
+          mv -f -- "$final_archive" "$archive"
+          node scripts/verify-macos-components.js --shell "$archive"
+          shasum -a 256 "$archive" > "$archive.sha256"
+
+          xcrun notarytool submit "$archive" \
+            --key "$key" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait \
+            --output-format json \
+            | tee "$RUNNER_TEMP/notary-final-archive.json"
+          node -e 'const r=require(process.argv[1]);if(r.status!=="Accepted")throw new Error(`Final archive notarization failed: ${JSON.stringify(r)}`)' "$RUNNER_TEMP/notary-final-archive.json"
+
+          ditto -x -k "$archive" "$final_verify_root"
+          final_app="$final_verify_root/Codex.app"
+          test -d "$final_app"
+          xcrun stapler validate -v "$final_app"
+          codesign --verify --deep --strict --verbose=4 "$final_app"
+          spctl --assess --type execute --verbose=4 "$final_app"
 
       - name: Upload controlled Shell candidate
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
