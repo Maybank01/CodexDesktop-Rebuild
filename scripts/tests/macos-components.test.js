@@ -12,6 +12,50 @@ const {
   validateMacShellTree,
 } = require("../macos-component-util");
 const { normalizeMacBundleEntrypoint } = require("../build-from-upstream");
+const {
+  assertMacSourceInfo,
+  validateMacSourceLock,
+  verifyMacSourceArchive,
+} = require("../sync-upstream");
+
+test("pins official macOS source identity, size, and SHA-256", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentrouter-mac-source-lock-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const archive = path.join(root, "fixture.zip");
+  fs.writeFileSync(archive, "pinned-upstream", "utf8");
+  const sha256 = require("node:crypto").createHash("sha256").update("pinned-upstream").digest("hex");
+  const lock = validateMacSourceLock({
+    schemaVersion: 1,
+    version: "26.715.31251",
+    build: "5538",
+    variants: {
+      arm64: {
+        url: "https://persistent.oaistatic.com/codex-app-prod/ChatGPT-darwin-arm64-26.715.31251.zip",
+        size: fs.statSync(archive).size,
+        sha256,
+      },
+      x64: {
+        url: "https://persistent.oaistatic.com/codex-app-prod/ChatGPT-darwin-x64-26.715.31251.zip",
+        size: fs.statSync(archive).size,
+        sha256,
+      },
+    },
+  });
+  const info = {
+    version: lock.version,
+    build: lock.build,
+    url: lock.variants.arm64.url,
+    size: lock.variants.arm64.size,
+  };
+  assert.doesNotThrow(() => assertMacSourceInfo(info, "arm64", lock));
+  assert.doesNotThrow(() => verifyMacSourceArchive(archive, "arm64", lock));
+  assert.throws(
+    () => assertMacSourceInfo({ ...info, version: "26.715.99999" }, "arm64", lock),
+    /drifted from lock/,
+  );
+  fs.appendFileSync(archive, "tamper", "utf8");
+  assert.throws(() => verifyMacSourceArchive(archive, "arm64", lock), /size mismatch/);
+});
 
 test("normalizes the renamed upstream executable to a stable Codex entrypoint", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentrouter-mac-entrypoint-test-"));

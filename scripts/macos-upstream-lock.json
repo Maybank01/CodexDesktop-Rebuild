@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "version": "26.715.31251",
+  "build": "5538",
+  "variants": {
+    "arm64": {
+      "url": "https://persistent.oaistatic.com/codex-app-prod/ChatGPT-darwin-arm64-26.715.31251.zip",
+      "size": 568225597,
+      "sha256": "1beef9950173d662fddafeccdee52a12906ed184debf3a62dd7610c1fc0ce6ef"
+    },
+    "x64": {
+      "url": "https://persistent.oaistatic.com/codex-app-prod/ChatGPT-darwin-x64-26.715.31251.zip",
+      "size": 528385187,
+      "sha256": "0156bc730c243bb0af6d991af94191db5150918e2d4327646b1f0b10ae94a9a2"
+    }
+  }
+}

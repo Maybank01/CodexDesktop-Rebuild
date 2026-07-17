@@ -15,6 +15,7 @@
  * Usage:
  *   node scripts/sync-upstream.js [--force] [--skip-mac] [--skip-win]
  *     [--refresh-download] [--cache-key <safe-key>]
+ *     [--mac-lock <repository-relative-json>]
  */
 
 const https = require("https");
@@ -22,7 +23,8 @@ const tls = require("tls");
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const crypto = require("crypto");
+const { execFileSync } = require("child_process");
 
 function parseSyncOptions(argv) {
   const cacheKeyIndex = argv.indexOf("--cache-key");
@@ -33,6 +35,14 @@ function parseSyncOptions(argv) {
   if (cacheKey && !/^[0-9A-Za-z._-]+$/.test(cacheKey)) {
     throw new Error("--cache-key may contain only letters, numbers, dot, underscore, and dash");
   }
+  const macLockIndex = argv.indexOf("--mac-lock");
+  const macLock = macLockIndex === -1 ? null : argv[macLockIndex + 1];
+  if (macLockIndex !== -1 && (!macLock || macLock.startsWith("--"))) {
+    throw new Error("--mac-lock requires a repository-relative JSON path");
+  }
+  if (macLock && (path.isAbsolute(macLock) || macLock.includes("\\"))) {
+    throw new Error("--mac-lock must use a repository-relative forward-slash path");
+  }
   return {
     force: argv.includes("--force"),
     checkOnly: argv.includes("--check-only"),
@@ -40,6 +50,7 @@ function parseSyncOptions(argv) {
     skipWin: argv.includes("--skip-win"),
     refreshDownload: argv.includes("--refresh-download"),
     cacheKey,
+    macLock,
   };
 }
 
@@ -68,6 +79,7 @@ const SRC_DIR = path.join(PROJECT_ROOT, "src");
 const OPTIONS = parseSyncOptions(process.argv.slice(2));
 const TEMP_DIR = getSyncCacheDir(OPTIONS.cacheKey);
 const VERSION_FILE = path.join(__dirname, ".versions.json");
+const MAC_SOURCE_LOCK = loadMacSourceLock(OPTIONS.macLock);
 
 const APPCAST_ARM64 = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml";
 const APPCAST_X64 = "https://persistent.oaistatic.com/codex-app-prod/appcast-x64.xml";
@@ -95,7 +107,75 @@ function httpGet(url) {
 
 function curlDownload(url, dest, label) {
   console.log(`  [dl] ${label}`);
-  execSync(`curl -L --retry 3 --retry-delay 2 -o "${dest}" "${url}"`, { stdio: "inherit" });
+  execFileSync(
+    "curl",
+    ["--fail", "--location", "--retry", "3", "--retry-delay", "2", "--output", dest, url],
+    { stdio: "inherit" },
+  );
+}
+
+function sha256File(filePath) {
+  const digest = crypto.createHash("sha256");
+  const fd = fs.openSync(filePath, "r");
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    while (true) {
+      const read = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (read === 0) break;
+      digest.update(buffer.subarray(0, read));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return digest.digest("hex");
+}
+
+function validateMacSourceLock(lock) {
+  if (!lock || lock.schemaVersion !== 1) throw new Error("macOS source lock schemaVersion must be 1");
+  if (!/^\d+(?:\.\d+){2,3}$/.test(String(lock.version || ""))) {
+    throw new Error("macOS source lock version is invalid");
+  }
+  if (!/^\d+$/.test(String(lock.build || ""))) throw new Error("macOS source lock build is invalid");
+  for (const variant of ["arm64", "x64"]) {
+    const record = lock.variants?.[variant];
+    const expectedUrl = `https://persistent.oaistatic.com/codex-app-prod/ChatGPT-darwin-${variant}-${lock.version}.zip`;
+    if (!record || record.url !== expectedUrl) throw new Error(`macOS ${variant} source URL is not pinned to ${expectedUrl}`);
+    if (!Number.isSafeInteger(record.size) || record.size <= 0) throw new Error(`macOS ${variant} source size is invalid`);
+    if (!/^[0-9a-f]{64}$/.test(String(record.sha256 || ""))) throw new Error(`macOS ${variant} source SHA-256 is invalid`);
+  }
+  return lock;
+}
+
+function loadMacSourceLock(relativePath) {
+  if (!relativePath) return null;
+  const resolved = path.resolve(PROJECT_ROOT, relativePath);
+  if (!resolved.startsWith(`${PROJECT_ROOT}${path.sep}`) || !fs.statSync(resolved).isFile()) {
+    throw new Error("--mac-lock must resolve to a file inside the repository");
+  }
+  return validateMacSourceLock(JSON.parse(fs.readFileSync(resolved, "utf8")));
+}
+
+function assertMacSourceInfo(info, variant, lock = MAC_SOURCE_LOCK) {
+  if (!lock) return;
+  const record = lock.variants[variant];
+  if (info.version !== lock.version || info.build !== String(lock.build)) {
+    throw new Error(
+      `macOS ${variant} appcast drifted from lock: expected ${lock.version} (${lock.build}), got ${info.version} (${info.build})`,
+    );
+  }
+  if (info.url !== record.url || info.size !== record.size) {
+    throw new Error(`macOS ${variant} appcast URL or size drifted from the committed source lock`);
+  }
+}
+
+function verifyMacSourceArchive(filePath, variant, lock = MAC_SOURCE_LOCK) {
+  if (!lock) return;
+  const record = lock.variants[variant];
+  const size = fs.statSync(filePath).size;
+  if (size !== record.size) throw new Error(`macOS ${variant} source size mismatch: expected ${record.size}, got ${size}`);
+  const actual = sha256File(filePath);
+  if (actual !== record.sha256) throw new Error(`macOS ${variant} source SHA-256 mismatch: expected ${record.sha256}, got ${actual}`);
+  console.log(`   [pin] ${variant} ${lock.version} sha256=${actual}`);
 }
 
 function extractArchive(archive, dest) {
@@ -211,6 +291,7 @@ async function getAppcastVersion(url) {
     version: latest.shortVersionString || latest.title,
     build: String(latest.version || ""),
     url: enc?.["@_url"] || "",
+    size: Number(enc?.["@_length"] || 0),
   };
 }
 
@@ -229,11 +310,10 @@ async function getWindowsVersion() {
 
 // ─── Extract macOS ──────────────────────────────────────────────
 
-async function syncMac(variant, appcastUrl, destDir) {
+async function syncMac(variant, info, destDir) {
   const label = `macOS-${variant}`;
   console.log(`\n-- ${label}`);
-
-  const info = await getAppcastVersion(appcastUrl);
+  assertMacSourceInfo(info, variant);
   console.log(`   version: ${info.version} (build ${info.build})`);
 
   const zipPath = path.join(TEMP_DIR, `Codex-${variant}-${info.version}.zip`);
@@ -247,6 +327,7 @@ async function syncMac(variant, appcastUrl, destDir) {
   } else {
     console.log(`   [cache] ${zipPath}`);
   }
+  verifyMacSourceArchive(zipPath, variant);
 
   console.log("   [unzip]");
   clearDir(extractDir);
@@ -362,6 +443,7 @@ async function main() {
   if (!SKIP_MAC) {
     try {
       const arm64Info = await getAppcastVersion(APPCAST_ARM64);
+      assertMacSourceInfo(arm64Info, "arm64");
       console.log(`\n   mac-arm64: ${arm64Info.version} (build ${arm64Info.build})`);
       results["mac-arm64"] = arm64Info;
     } catch (e) {
@@ -371,6 +453,7 @@ async function main() {
 
     try {
       const x64Info = await getAppcastVersion(APPCAST_X64);
+      assertMacSourceInfo(x64Info, "x64");
       console.log(`   mac-x64:   ${x64Info.version} (build ${x64Info.build})`);
       results["mac-x64"] = x64Info;
     } catch (e) {
@@ -399,7 +482,7 @@ async function main() {
   // Download and extract
   if (!SKIP_MAC && results["mac-arm64"]) {
     try {
-      results["mac-arm64"] = await syncMac("arm64", APPCAST_ARM64, path.join(SRC_DIR, "mac-arm64"));
+      results["mac-arm64"] = await syncMac("arm64", results["mac-arm64"], path.join(SRC_DIR, "mac-arm64"));
     } catch (e) {
       failures.push(`mac-arm64 sync: ${e.message}`);
       console.error(`   [x] mac-arm64: ${e.message}`);
@@ -407,7 +490,7 @@ async function main() {
   }
   if (!SKIP_MAC && results["mac-x64"]) {
     try {
-      results["mac-x64"] = await syncMac("x64", APPCAST_X64, path.join(SRC_DIR, "mac-x64"));
+      results["mac-x64"] = await syncMac("x64", results["mac-x64"], path.join(SRC_DIR, "mac-x64"));
     } catch (e) {
       failures.push(`mac-x64 sync: ${e.message}`);
       console.error(`   [x] mac-x64: ${e.message}`);
@@ -441,7 +524,14 @@ async function main() {
   }
 }
 
-module.exports = { getSyncCacheDir, parseSyncOptions, refreshCachedArchive };
+module.exports = {
+  assertMacSourceInfo,
+  getSyncCacheDir,
+  parseSyncOptions,
+  refreshCachedArchive,
+  validateMacSourceLock,
+  verifyMacSourceArchive,
+};
 
 if (require.main === module) {
   main().catch((e) => { console.error(`\n[x] ${e.message}`); process.exit(1); });

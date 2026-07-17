@@ -114,6 +114,7 @@ test("refresh-download and isolated cache-key options are deterministic", (t) =>
     skipWin: false,
     refreshDownload: true,
     cacheKey: "latest-26.707.31428",
+    macLock: null,
   });
   assert.equal(
     getSyncCacheDir(options.cacheKey, "C:\\Temp"),
@@ -121,6 +122,8 @@ test("refresh-download and isolated cache-key options are deterministic", (t) =>
   );
   assert.throws(() => parseSyncOptions(["--cache-key", "..\\escape"]), /cache-key may contain/);
   assert.throws(() => parseSyncOptions(["--cache-key"]), /requires a value/);
+  assert.throws(() => parseSyncOptions(["--mac-lock", "..\\escape.json"]), /forward-slash/);
+  assert.throws(() => parseSyncOptions(["--mac-lock"]), /requires a repository-relative/);
 
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-sync-options-"));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
