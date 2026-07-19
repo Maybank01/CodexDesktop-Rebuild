@@ -17,6 +17,7 @@ const PATCHES = [
   "patch-fast-mode.js",
   "patch-model-list-filter.js",
   "patch-plugin-auth.js",
+  "patch-account-readiness-logging.js",
   "patch-updater.js",
 ];
 

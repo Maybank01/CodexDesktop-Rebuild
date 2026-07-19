@@ -25,6 +25,9 @@ const {
 const { getSyncCacheDir, parseSyncOptions, refreshCachedArchive } = require("../sync-upstream");
 const { PATCHES, getPassArgs } = require("../patch-all");
 const { collectPatches: collectFastModePatches } = require("../patch-fast-mode");
+const {
+  collectReadinessPatches,
+} = require("../patch-account-readiness-logging");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 
@@ -34,6 +37,7 @@ test("maintained Shell patch chain is minimal and strict by default", () => {
     "patch-fast-mode.js",
     "patch-model-list-filter.js",
     "patch-plugin-auth.js",
+    "patch-account-readiness-logging.js",
     "patch-updater.js",
   ]);
   assert.deepEqual(getPassArgs(["win"]), ["win", "--require-change"]);
@@ -43,6 +47,46 @@ test("maintained Shell patch chain is minimal and strict by default", () => {
     "--require-change",
   ]);
   assert.deepEqual(getPassArgs(["win", "--allow-noop"]), ["win"]);
+});
+
+test("account/read response logging adds only redacted readiness fields", () => {
+  const source = [
+    "class Connection{routeIncomingMessage(e){",
+    "let n=this.pendingRequests.get(String(e.id)),t=String(e.id);",
+    "this.logger.info(`response_routed`,{safe:{requestId:t,method:n?.method??null,",
+    "conversationId:n?.conversationId??null,originWebcontentsId:n?.originWebContentsId??null,",
+    "durationMs:1,hadPending:n!=null,hadInternalHandler:!1,targetDestroyed:!1,",
+    "broadcastFallback:!1,errorCode:e.error?.code??null},sensitive:{}})}}",
+  ].join("");
+  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  const patches = collectReadinessPatches(ast, source);
+  assert.equal(patches.length, 1);
+
+  const marker = patches[0].replacement;
+  assert.match(marker, /n\?\.method===`account\/read`/);
+  assert.match(marker, /accountType:typeof e\.result\?\.account\?\.type===`string`/);
+  assert.match(
+    marker,
+    /requiresOpenaiAuth:typeof e\.result\?\.requiresOpenaiAuth===`boolean`/,
+  );
+  assert.doesNotMatch(marker, /email|token|apiKey|sensitive/i);
+
+  const patched = source.slice(0, patches[0].start) + marker + source.slice(patches[0].end);
+  assert.match(patched, /requestId:t/);
+  assert.match(patched, /originWebcontentsId:n\?\.originWebContentsId/);
+  const patchedAst = parse(patched, { ecmaVersion: "latest", sourceType: "module" });
+  assert.deepEqual(collectReadinessPatches(patchedAst, patched), []);
+});
+
+test("account/read response logging fails closed when routing identity fields drift", () => {
+  const source =
+    "this.logger.info(`response_routed`,{safe:{method:n?.method??null," +
+    "errorCode:e.error?.code??null},sensitive:{}})";
+  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  assert.throws(
+    () => collectReadinessPatches(ast, source),
+    /response_routed safe payload is missing requestId/,
+  );
 });
 
 test("Fast mode patch covers negative and positive ChatGPT auth gates", () => {
