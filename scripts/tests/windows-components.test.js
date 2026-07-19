@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -116,6 +117,24 @@ function runScript(scriptName, args) {
 
 function writeFakePe(filePath, label) {
   fs.writeFileSync(filePath, Buffer.from(`MZ-${label}`, "utf8"));
+}
+
+function expectedStableCompositionId(composition) {
+  const canonical = [
+    "schema=2",
+    `platform=${composition.platformKey}`,
+    `shell.version=${composition.shell.version}`,
+    `shell.sha256=${composition.shell.artifact.sha256}`,
+    `shell.entrypoint=${composition.shell.entrypoint}`,
+    `core.version=${composition.core.version}`,
+    `core.sha256=${composition.core.artifact.sha256}`,
+    `core.fileSha256=${composition.core.fileSha256}`,
+    `core.targetPath=${composition.core.targetPath}`,
+    `core.upstreamGitSha=${composition.core.upstreamGitSha}`,
+    "",
+  ].join("\n");
+  const fingerprint = crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
+  return `${composition.platformKey}.shell-${composition.shell.version}.core-${composition.core.version}-${fingerprint.slice(0, 16)}`;
 }
 
 function createShellFixture(root, version = "26.707.31428") {
@@ -298,6 +317,54 @@ test("Shell, Core, and test composition obey the two-layer contract", (t) => {
   assert.equal(manifest.compositions[0].core.artifact.sourceId, "source-agentrouter-download");
   assert.equal(Object.hasOwn(manifest.compositions[0].shell.artifact, "mirrors"), false);
   assert.equal(Object.hasOwn(manifest.compositions[0].core.artifact, "mirrors"), false);
+  assert.equal(
+    manifest.compositions[0].id,
+    expectedStableCompositionId(manifest.compositions[0]),
+  );
+
+  const repeatedManifestPath = path.join(temp, "runtime-components-dev-repeated.json");
+  const repeatedManifestArgs = [...manifestArgs];
+  repeatedManifestArgs[repeatedManifestArgs.indexOf("--output") + 1] = repeatedManifestPath;
+  runScript("generate-runtime-components-manifest.js", repeatedManifestArgs);
+  const repeatedManifest = JSON.parse(fs.readFileSync(repeatedManifestPath, "utf8"));
+  assert.equal(repeatedManifest.compositions[0].id, manifest.compositions[0].id);
+
+  const changedShellTree = path.join(temp, "changed shell tree");
+  fs.cpSync(shellTree, changedShellTree, { recursive: true });
+  fs.writeFileSync(
+    path.join(changedShellTree, "resources", "app.asar"),
+    "fixture-asar-with-different-component-bytes",
+    "utf8",
+  );
+  const changedShellZip = path.join(
+    temp,
+    "changed shell",
+    path.basename(shellZip),
+  );
+  createZip(changedShellTree, changedShellZip);
+  const changedManifestPath = path.join(temp, "runtime-components-dev-changed-shell.json");
+  const changedManifestArgs = [...manifestArgs];
+  changedManifestArgs[changedManifestArgs.indexOf("--shell") + 1] = changedShellZip;
+  changedManifestArgs[changedManifestArgs.indexOf("--output") + 1] = changedManifestPath;
+  runScript("generate-runtime-components-manifest.js", changedManifestArgs);
+  const changedManifest = JSON.parse(fs.readFileSync(changedManifestPath, "utf8"));
+  assert.equal(
+    changedManifest.compositions[0].shell.version,
+    manifest.compositions[0].shell.version,
+  );
+  assert.equal(
+    changedManifest.compositions[0].core.artifact.sha256,
+    manifest.compositions[0].core.artifact.sha256,
+  );
+  assert.notEqual(
+    changedManifest.compositions[0].shell.artifact.sha256,
+    manifest.compositions[0].shell.artifact.sha256,
+  );
+  assert.equal(
+    changedManifest.compositions[0].id,
+    expectedStableCompositionId(changedManifest.compositions[0]),
+  );
+  assert.notEqual(changedManifest.compositions[0].id, manifest.compositions[0].id);
 
   const invalidCases = [
     {

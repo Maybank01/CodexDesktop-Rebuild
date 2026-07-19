@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const {
@@ -86,6 +87,24 @@ function artifact(archivePath, url, componentKind) {
   };
 }
 
+function stableCompositionId(composition) {
+  const canonical = [
+    "schema=2",
+    `platform=${composition.platformKey}`,
+    `shell.version=${composition.shell.version}`,
+    `shell.sha256=${composition.shell.artifact.sha256}`,
+    `shell.entrypoint=${composition.shell.entrypoint}`,
+    `core.version=${composition.core.version}`,
+    `core.sha256=${composition.core.artifact.sha256}`,
+    `core.fileSha256=${composition.core.fileSha256}`,
+    `core.targetPath=${composition.core.targetPath}`,
+    `core.upstreamGitSha=${composition.core.upstreamGitSha}`,
+    "",
+  ].join("\n");
+  const fingerprint = crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
+  return `${composition.platformKey}.shell-${composition.shell.version}.core-${composition.core.version}-${fingerprint.slice(0, 16)}`;
+}
+
 function main() {
   const args = process.argv.slice(2);
   rejectMirrorUrlOptions(args);
@@ -119,31 +138,38 @@ function main() {
   const coreFile = core.manifest.files[0];
   const shellArtifact = artifact(shellPath, shellUrl, "shell");
   const coreArtifact = artifact(corePath, coreUrl, "core");
-  const id = `windows-x64.shell-${shell.manifest.version}.core-${core.manifest.version}`;
+  const platformKey = "windows-x64";
+  const shellComponent = {
+    version: shell.manifest.version,
+    sourcePackageVersion: shell.manifest.sourcePackageVersion || null,
+    entrypoint: shell.manifest.entrypoint,
+    artifact: shellArtifact,
+  };
+  const coreComponent = {
+    version: core.manifest.version,
+    upstreamGitSha,
+    payloadPath: core.manifest.entrypoint,
+    targetPath: core.manifest.entrypoint,
+    fileSha256: coreFile.sha256,
+    compatibleShellVersions,
+    artifact: coreArtifact,
+  };
+  const id = stableCompositionId({
+    platformKey,
+    shell: shellComponent,
+    core: coreComponent,
+  });
   const manifest = {
     schemaVersion: 2,
     channel,
     compositions: [
       {
         id,
-        platformKey: "windows-x64",
+        platformKey,
         publishedAt,
         minimumClientVersion,
-        shell: {
-          version: shell.manifest.version,
-          sourcePackageVersion: shell.manifest.sourcePackageVersion || null,
-          entrypoint: shell.manifest.entrypoint,
-          artifact: shellArtifact,
-        },
-        core: {
-          version: core.manifest.version,
-          upstreamGitSha,
-          payloadPath: core.manifest.entrypoint,
-          targetPath: core.manifest.entrypoint,
-          fileSha256: coreFile.sha256,
-          compatibleShellVersions,
-          artifact: coreArtifact,
-        },
+        shell: shellComponent,
+        core: coreComponent,
       },
     ],
   };
