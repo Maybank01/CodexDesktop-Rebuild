@@ -29,6 +29,11 @@ const { collectPatches: collectFastModePatches } = require("../patch-fast-mode")
 const {
   collectReadinessPatches,
 } = require("../patch-account-readiness-logging");
+const {
+  ORIGINAL: ORIGINAL_GENERATED_IMAGE_SELECTOR,
+  PATCHED: PATCHED_GENERATED_IMAGE_SELECTOR,
+  patchSource: patchGeneratedImagePreview,
+} = require("../patch-generated-image-preview");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 
@@ -39,6 +44,7 @@ test("maintained Shell patch chain is minimal and strict by default", () => {
     "patch-model-list-filter.js",
     "patch-plugin-auth.js",
     "patch-account-readiness-logging.js",
+    "patch-generated-image-preview.js",
     "patch-updater.js",
   ]);
   assert.deepEqual(getPassArgs(["win"]), ["win", "--require-change"]);
@@ -48,6 +54,21 @@ test("maintained Shell patch chain is minimal and strict by default", () => {
     "--require-change",
   ]);
   assert.deepEqual(getPassArgs(["win", "--allow-noop"]), ["win"]);
+});
+
+test("generated image previews prefer the image payload over the Windows saved path", () => {
+  const result = patchGeneratedImagePreview(
+    `before;${ORIGINAL_GENERATED_IMAGE_SELECTOR};after`,
+  );
+  assert.equal(result.changed, true);
+  assert.equal(
+    result.source,
+    `before;${PATCHED_GENERATED_IMAGE_SELECTOR};after`,
+  );
+
+  const repeated = patchGeneratedImagePreview(result.source);
+  assert.equal(repeated.changed, false);
+  assert.equal(repeated.source, result.source);
 });
 
 test("account/read response logging adds only redacted readiness fields", () => {
