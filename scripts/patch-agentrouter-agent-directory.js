@@ -10,6 +10,7 @@ const fs = require("fs");
 const { locateBundles, relPath } = require("./patch-util");
 
 const PATCH_MARKER = "AGENTROUTER_AGENT_DIRECTORY_PATCH_V1";
+const HOST_ROUTING_MARKER = "AGENTROUTER_AGENT_HOST_ROUTING_PATCH_V1";
 
 function replaceOnce(code, search, replacement, label) {
   const index = code.indexOf(search);
@@ -61,13 +62,25 @@ function patchMain(bundle) {
     const eagerNavigation =
       "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;setTimeout(()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())},150)}";
     const connectedNavigation =
-      "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(e,300),()=>setTimeout(e,300))}";
+      "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`,conversationId:u.threadId,hostId:`agentrouter-agent:${u.agentId}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(e,300),()=>setTimeout(e,300))}";
     if (code.includes(eagerNavigation)) {
       code = replaceOnce(
         code,
         eagerNavigation,
         connectedNavigation,
         "Connected Agent Session navigation",
+      );
+      upgraded = true;
+    }
+
+    const connectedNavigationWithoutHost =
+      "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(e,300),()=>setTimeout(e,300))}";
+    if (code.includes(connectedNavigationWithoutHost)) {
+      code = replaceOnce(
+        code,
+        connectedNavigationWithoutHost,
+        connectedNavigation,
+        "Agent Session host-aware navigation payload",
       );
       upgraded = true;
     }
@@ -164,7 +177,7 @@ function patchMain(bundle) {
     "this.sharedObjectRepository.set(`agentrouter_agent_connections`,p);",
     "void this.remoteConnectionsHandler.connectRemoteConnectionsAndLogFailures(p.map(e=>e.hostId));",
     "let l=a.openRequest,u=l&&o.find(e=>e.agentId===l.agentId&&e.endpointUrl);",
-    "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(e,300),()=>setTimeout(e,300))}",
+    "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`,conversationId:u.threadId,hostId:`agentrouter-agent:${u.agentId}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(e,300),()=>setTimeout(e,300))}",
     "})},40)};",
     "i();",
     "try{let r=t.watch(n.dirname(e),(t,r)=>{r==null||r.toString()===n.basename(e)?i():void 0});this.disposables.add({dispose:()=>r.close()})}catch{}",
@@ -185,6 +198,29 @@ function patchMain(bundle) {
 
   fs.writeFileSync(bundle.path, code);
   console.log(`  [ok] ${relPath(bundle.path)}: Agent directory host bridge`);
+}
+
+function patchRendererNavigation(bundle) {
+  let code = fs.readFileSync(bundle.path, "utf8");
+  if (code.includes(HOST_ROUTING_MARKER)) {
+    console.log(`  [ok] ${relPath(bundle.path)}: Agent host routing already patched`);
+    return;
+  }
+
+  const navigationAnchor =
+    "(k=e=>{if(!(s&&!Je(e.path))&&!(a&&!Gh(e.path))){if(e.persistForReload===!0){";
+  const hostAwareNavigation =
+    "(k=e=>{if(!(s&&!Je(e.path))&&!(a&&!Gh(e.path))){void `" +
+    HOST_ROUTING_MARKER +
+    "`;typeof e.hostId===`string`&&typeof e.conversationId===`string`&&yo(t,e.conversationId,e.hostId);if(e.persistForReload===!0){";
+  code = replaceOnce(
+    code,
+    navigationAnchor,
+    hostAwareNavigation,
+    "Renderer Agent Session host selection",
+  );
+  fs.writeFileSync(bundle.path, code);
+  console.log(`  [ok] ${relPath(bundle.path)}: Agent Session mapped to its Gateway host before navigation`);
 }
 
 function patchHostConfig(bundle) {
@@ -327,12 +363,14 @@ function main() {
   const mainBundles = locateBundles({ dir: "build", pattern: /^main-.*\.js$/, ...(platform ? { platform } : {}) });
   const hostBundles = locateBundles({ dir: "assets", pattern: /^use-host-config-.*\.js$/, ...(platform ? { platform } : {}) });
   const sidebarBundles = locateBundles({ dir: "assets", pattern: /^sidebar-flat-sections-.*\.js$/, ...(platform ? { platform } : {}) });
-  if (!mainBundles.length || !hostBundles.length || !sidebarBundles.length) {
+  const rendererBundles = locateBundles({ dir: "assets", pattern: /^app-main-.*\.js$/, ...(platform ? { platform } : {}) });
+  if (!mainBundles.length || !hostBundles.length || !sidebarBundles.length || !rendererBundles.length) {
     throw new Error("Required Codex Shell bundles were not found");
   }
   mainBundles.forEach(patchMain);
   hostBundles.forEach(patchHostConfig);
   sidebarBundles.forEach(patchSidebar);
+  rendererBundles.forEach(patchRendererNavigation);
 }
 
 main();
