@@ -14,6 +14,7 @@ const path = require("path");
 
 const PATCHES = [
   "patch-i18n.js",
+  "patch-windows-native-menu-localization.js",
   "patch-fast-mode.js",
   "patch-model-list-filter.js",
   "patch-plugin-auth.js",

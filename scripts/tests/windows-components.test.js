@@ -25,6 +25,13 @@ const {
 } = require("../windows-component-util");
 const { getSyncCacheDir, parseSyncOptions, refreshCachedArchive } = require("../sync-upstream");
 const { PATCHES, getPassArgs } = require("../patch-all");
+const {
+  LITERAL_LABELS: WINDOWS_NATIVE_MENU_LITERAL_LABELS,
+  LOCALE_MESSAGES: WINDOWS_NATIVE_MENU_MESSAGES,
+  MARKER: WINDOWS_NATIVE_MENU_MARKER,
+  mergeLocaleMessages: mergeWindowsNativeMenuMessages,
+  patchMainSource: patchWindowsNativeMenuSource,
+} = require("../patch-windows-native-menu-localization");
 const { collectPatches: collectFastModePatches } = require("../patch-fast-mode");
 const {
   collectReadinessPatches,
@@ -40,6 +47,7 @@ const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 test("maintained Shell patch chain is minimal and strict by default", () => {
   assert.deepEqual(PATCHES, [
     "patch-i18n.js",
+    "patch-windows-native-menu-localization.js",
     "patch-fast-mode.js",
     "patch-model-list-filter.js",
     "patch-plugin-auth.js",
@@ -56,6 +64,41 @@ test("maintained Shell patch chain is minimal and strict by default", () => {
     "--require-change",
   ]);
   assert.deepEqual(getPassArgs(["win", "--allow-noop"]), ["win"]);
+});
+
+test("Windows native menu keeps the complete user-visible Chinese vocabulary", () => {
+  const requiredMessages = {
+    "codex.commandMenuTitle.newWindow": "新建窗口",
+    "codex.commandMenuTitle.newThread": "新建任务",
+    "codex.commandMenuTitle.newProjectlessTask": "新建无项目任务",
+    "codex.commandMenuTitle.openFolder": "打开文件夹…",
+    "codex.commandMenuTitle.closeWindow": "关闭",
+    "codex.commandMenuTitle.settings": "设置…",
+    "agentrouter.nativeMenu.logOut": "退出登录",
+    "agentrouter.nativeMenu.exit": "退出",
+  };
+  for (const [key, value] of Object.entries(requiredMessages)) {
+    assert.equal(WINDOWS_NATIVE_MENU_MESSAGES[key], value);
+  }
+
+  const first = mergeWindowsNativeMenuMessages({ existing: "保留" });
+  assert.equal(first.changed, true);
+  assert.equal(first.messages.existing, "保留");
+  assert.equal(first.messages["codex.commandMenuTitle.newWindow"], "新建窗口");
+  const repeated = mergeWindowsNativeMenuMessages(first.messages);
+  assert.equal(repeated.changed, false);
+
+  const fixture = [
+    "function b8(){",
+    "accelerator:n.Gt({commandId:e,isMacOS:t}).filter(w)[r??0]}},O=",
+    ...WINDOWS_NATIVE_MENU_LITERAL_LABELS.map(([original]) => original),
+    "new c.MenuItem({role:`quit`,accelerator:`Ctrl+Q`})",
+  ].join(";");
+  const patched = patchWindowsNativeMenuSource(fixture);
+  assert.equal(patched.changed, true);
+  assert.match(patched.source, new RegExp(WINDOWS_NATIVE_MENU_MARKER));
+  assert.doesNotMatch(patched.source, /label:`(?:Log Out|Documentation|What's New|Troubleshooting|Send Feedback)`/);
+  assert.equal(patchWindowsNativeMenuSource(patched.source).changed, false);
 });
 
 test("generated image previews prefer the image payload over the Windows saved path", () => {
