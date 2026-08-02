@@ -31,20 +31,53 @@ function replaceOneOf(code, candidates, replacement, label) {
 function patchMain(bundle) {
   let code = fs.readFileSync(bundle.path, "utf8");
   if (code.includes(PATCH_MARKER)) {
+    let upgraded = false;
     const legacyNavigation =
       "setTimeout(()=>{c.shell.openExternal(`codex://threads/${encodeURIComponent(u.threadId)}`).catch(()=>void 0)},150)";
-    if (!code.includes(legacyNavigation)) {
+    if (code.includes(legacyNavigation)) {
+      code = replaceOnce(
+        code,
+        legacyNavigation,
+        "setTimeout(()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())},150)",
+        "Legacy Agent Session navigation",
+      );
+      upgraded = true;
+    }
+
+    const disconnectedConnections =
+      "this.sharedObjectRepository.set(`agentrouter_agent_connections`,o.flatMap(e=>e.endpointUrl?[{hostId:`agentrouter-agent:${e.agentId}`,displayName:`${e.roleName} · ${e.agentName}`,source:`agentrouter-agent`,roleId:e.roleId,roleName:e.roleName,agentId:e.agentId,agentName:e.agentName,threadId:e.threadId,websocketUrl:e.endpointUrl,autoConnect:!0}]:[]));";
+    const connectedConnections =
+      "let p=o.flatMap(e=>e.endpointUrl?[{hostId:`agentrouter-agent:${e.agentId}`,displayName:`${e.roleName} · ${e.agentName}`,source:`agentrouter-agent`,roleId:e.roleId,roleName:e.roleName,agentId:e.agentId,agentName:e.agentName,threadId:e.threadId,websocketUrl:e.endpointUrl,autoConnect:!0}]:[]);this.sharedObjectRepository.set(`agentrouter_agent_connections`,p);void this.remoteConnectionsHandler.connectRemoteConnectionsAndLogFailures(p.map(e=>e.hostId));";
+    if (code.includes(disconnectedConnections)) {
+      code = replaceOnce(
+        code,
+        disconnectedConnections,
+        connectedConnections,
+        "Agent Gateway auto-connect",
+      );
+      upgraded = true;
+    }
+
+    const eagerNavigation =
+      "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;setTimeout(()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())},150)}";
+    const connectedNavigation =
+      "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(e,300),()=>setTimeout(e,300))}";
+    if (code.includes(eagerNavigation)) {
+      code = replaceOnce(
+        code,
+        eagerNavigation,
+        connectedNavigation,
+        "Connected Agent Session navigation",
+      );
+      upgraded = true;
+    }
+
+    if (!upgraded) {
       console.log(`  [ok] ${relPath(bundle.path)}: main already patched`);
       return;
     }
-    code = replaceOnce(
-      code,
-      legacyNavigation,
-      "setTimeout(()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())},150)",
-      "Legacy Agent Session navigation",
-    );
     fs.writeFileSync(bundle.path, code);
-    console.log(`  [ok] ${relPath(bundle.path)}: upgraded Agent Session navigation`);
+    console.log(`  [ok] ${relPath(bundle.path)}: upgraded Agent Gateway connection and navigation`);
     return;
   }
 
@@ -127,9 +160,11 @@ function patchMain(bundle) {
     "}",
     "let s={schemaVersion:1,revision:Number(a.revision)||Date.now(),entries:o};",
     "this.sharedObjectRepository.set(`agentrouter_agent_directory`,s);",
-    "this.sharedObjectRepository.set(`agentrouter_agent_connections`,o.flatMap(e=>e.endpointUrl?[{hostId:`agentrouter-agent:${e.agentId}`,displayName:`${e.roleName} · ${e.agentName}`,source:`agentrouter-agent`,roleId:e.roleId,roleName:e.roleName,agentId:e.agentId,agentName:e.agentName,threadId:e.threadId,websocketUrl:e.endpointUrl,autoConnect:!0}]:[]));",
+    "let p=o.flatMap(e=>e.endpointUrl?[{hostId:`agentrouter-agent:${e.agentId}`,displayName:`${e.roleName} · ${e.agentName}`,source:`agentrouter-agent`,roleId:e.roleId,roleName:e.roleName,agentId:e.agentId,agentName:e.agentName,threadId:e.threadId,websocketUrl:e.endpointUrl,autoConnect:!0}]:[]);",
+    "this.sharedObjectRepository.set(`agentrouter_agent_connections`,p);",
+    "void this.remoteConnectionsHandler.connectRemoteConnectionsAndLogFailures(p.map(e=>e.hostId));",
     "let l=a.openRequest,u=l&&o.find(e=>e.agentId===l.agentId&&e.endpointUrl);",
-    "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;setTimeout(()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())},150)}",
+    "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(e,300),()=>setTimeout(e,300))}",
     "})},40)};",
     "i();",
     "try{let r=t.watch(n.dirname(e),(t,r)=>{r==null||r.toString()===n.basename(e)?i():void 0});this.disposables.add({dispose:()=>r.close()})}catch{}",
