@@ -19,6 +19,8 @@ const PATCHES = [
   "patch-plugin-auth.js",
   "patch-account-readiness-logging.js",
   "patch-generated-image-preview.js",
+  "patch-windows-onboarding-recovery.js",
+  "patch-agentrouter-agent-directory.js",
   "patch-updater.js",
 ];
 

@@ -45,6 +45,8 @@ test("maintained Shell patch chain is minimal and strict by default", () => {
     "patch-plugin-auth.js",
     "patch-account-readiness-logging.js",
     "patch-generated-image-preview.js",
+    "patch-windows-onboarding-recovery.js",
+    "patch-agentrouter-agent-directory.js",
     "patch-updater.js",
   ]);
   assert.deepEqual(getPassArgs(["win"]), ["win", "--require-change"]);
