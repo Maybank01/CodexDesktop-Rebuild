@@ -46,7 +46,8 @@ build is required. Linux builds still use the platform-native Cometix runtime.
 AgentRouter Client can install the Windows Desktop Shell and Codex Core as two
 independently verified artifacts. The first Core component format owns exactly
 `resources/codex.exe` plus `agentrouter-core.json`; the Shell intentionally has
-no `resources/codex.exe` and includes `agentrouter-shell.json` instead. A Shell
+neither `resources/codex.exe` nor the non-Windows `resources/codex`, and includes
+`agentrouter-shell.json` instead. A Shell
 must never be activated before composition succeeds.
 
 ```powershell

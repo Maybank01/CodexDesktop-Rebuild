@@ -8,12 +8,13 @@
  * Usage:
  *   node scripts/build-from-upstream.js --platform mac-arm64
  *   node scripts/build-from-upstream.js --platform mac-x64
- *   node scripts/build-from-upstream.js --platform win [--artifact shell|composite]
+ *   node scripts/build-from-upstream.js --platform win [--artifact shell|composite] [--development-evidence]
  */
 const fs = require("fs");
 const path = require("path");
 const { execFileSync, execSync } = require("child_process");
 const { prepareShellTree } = require("./windows-component-util");
+const { verifyReleaseSource } = require("./release-source-guard");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
@@ -231,7 +232,7 @@ function buildMac(platform) {
 
 // ─── Windows build ──────────────────────────────────────────────
 
-function buildWin(platform, { artifact, cacheKey, sourcePackageVersion }) {
+function buildWin(platform, { artifact, cacheKey, sourcePackageVersion, sourceIdentity }) {
   const platformDir = path.join(SRC_DIR, platform);
   const asarDir = path.join(platformDir, "_asar");
 
@@ -295,8 +296,8 @@ function buildWin(platform, { artifact, cacheKey, sourcePackageVersion }) {
   // A Shell artifact deliberately has no Core entrypoint. It cannot be
   // activated until AgentRouter Client composes it with a verified Core.
   if (artifact === "shell") {
-    prepareShellTree(outApp, version, { sourcePackageVersion });
-    console.log("   [component] removed resources/codex.exe and wrote agentrouter-shell.json");
+    prepareShellTree(outApp, version, { sourcePackageVersion, ...sourceIdentity });
+    console.log("   [component] removed non-Shell Core payloads and wrote agentrouter-shell.json");
   } else {
     // Keep the official Store runtime so the desktop model catalog and CLI stay
     // on the same release. Opt in to Cometix only for compatibility testing.
@@ -403,6 +404,7 @@ function main() {
   const explicitSourcePackageVersion = sourceVersionIdx !== -1 ? args[sourceVersionIdx + 1] : null;
   const cacheKeyIdx = args.indexOf("--cache-key");
   const explicitCacheKey = cacheKeyIdx !== -1 ? args[cacheKeyIdx + 1] : null;
+  const developmentEvidence = args.includes("--development-evidence");
 
   if (!platform || !["mac-arm64", "mac-x64", "win"].includes(platform)) {
     console.error("[x] Usage: build-from-upstream.js --platform <mac-arm64|mac-x64|win> [--artifact <shell|composite>]");
@@ -436,6 +438,9 @@ function main() {
     console.error("[x] Shell builds require Windows sourcePackageVersion from sync-upstream or --source-package-version");
     process.exit(1);
   }
+  const sourceIdentity = platform === "win" && artifact === "shell"
+    ? verifyReleaseSource({ root: PROJECT_ROOT, developmentEvidence })
+    : null;
 
   console.log(`\n== Build from upstream: ${platform} (${artifact}) ==\n`);
   fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -443,7 +448,7 @@ function main() {
   if (platform.startsWith("mac")) {
     buildMac(platform);
   } else {
-    buildWin(platform, { artifact, cacheKey, sourcePackageVersion });
+    buildWin(platform, { artifact, cacheKey, sourcePackageVersion, sourceIdentity });
   }
 }
 

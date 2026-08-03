@@ -23,8 +23,18 @@ const {
   validateShellTree,
   writeJson,
 } = require("../windows-component-util");
+const { normalizeRemoteUrl } = require("../release-source-guard");
 const { getSyncCacheDir, parseSyncOptions, refreshCachedArchive } = require("../sync-upstream");
 const { PATCHES, getPassArgs } = require("../patch-all");
+const {
+  PATCH_MARKER: MANAGED_RUNTIME_PATCH_MARKER,
+  PERMISSION_OVERRIDE_ORIGINAL,
+  PERMISSION_OVERRIDE_PATCHED,
+  RUNTIME_UPDATER_ORIGINAL,
+  RUNTIME_UPDATER_PATCHED,
+  patchMainSource: patchManagedRuntimeMainSource,
+  patchPermissionSource,
+} = require("../patch-agentrouter-managed-runtime");
 const {
   LITERAL_LABELS: WINDOWS_NATIVE_MENU_LITERAL_LABELS,
   LOCALE_MESSAGES: WINDOWS_NATIVE_MENU_MESSAGES,
@@ -54,6 +64,7 @@ test("maintained Shell patch chain is minimal and strict by default", () => {
     "patch-account-readiness-logging.js",
     "patch-generated-image-preview.js",
     "patch-windows-onboarding-recovery.js",
+    "patch-agentrouter-managed-runtime.js",
     "patch-agentrouter-agent-directory.js",
     "patch-updater.js",
   ]);
@@ -208,8 +219,53 @@ function createShellFixture(root, version = "26.707.31428") {
   writeFakePe(path.join(root, "Codex.exe"), "desktop-shell");
   fs.writeFileSync(path.join(root, "resources", "app.asar"), "fixture-asar", "utf8");
   writeFakePe(path.join(root, ...CORE_ENTRYPOINT.split("/")), "old-core");
-  prepareShellTree(root, version, { sourcePackageVersion: "26.707.3748.0" });
+  fs.writeFileSync(path.join(root, "resources", "codex"), "non-windows-core", "utf8");
+  prepareShellTree(root, version, {
+    sourcePackageVersion: "26.707.3748.0",
+    sourceGitSha: "a".repeat(40),
+    sourceBranch: "agent/runtime-components-v2",
+    releaseBranch: "agent/runtime-components-v2",
+    sourceRemote: "fork",
+    sourceRemoteSha: "a".repeat(40),
+    sourceDirty: false,
+    productionEligible: true,
+  });
 }
+
+test("release source URL normalization treats GitHub HTTPS and SSH as the same remote", () => {
+  assert.equal(
+    normalizeRemoteUrl("git@github.com:Maybank01/CodexDesktop-Rebuild.git"),
+    normalizeRemoteUrl("https://github.com/Maybank01/CodexDesktop-Rebuild.git"),
+  );
+});
+
+test("managed Runtime patch disables upstream updates and repairs relocated ACLs", () => {
+  const original = `class RuntimePoller{${RUNTIME_UPDATER_ORIGINAL}\`enabled\`:\`disabled\`}}`;
+  const result = patchManagedRuntimeMainSource(original);
+  assert.equal(result.changed, true);
+  assert.equal(result.matched, true);
+  assert.match(result.source, new RegExp(MANAGED_RUNTIME_PATCH_MARKER));
+  assert.equal(result.source.includes(RUNTIME_UPDATER_ORIGINAL), false);
+  assert.equal(result.source.includes(RUNTIME_UPDATER_PATCHED), true);
+  assert.match(result.source, /AGENTROUTER_CLIENT_LOG_DIR/);
+  assert.match(result.source, /AGENTROUTER_API_KEY/);
+  assert.match(result.source, /icacls\.exe/);
+  assert.match(result.source, /S-1-15-2-1/);
+  assert.match(result.source, /S-1-15-2-2/);
+  assert.doesNotThrow(() => parse(result.source, { ecmaVersion: "latest" }));
+});
+
+test("managed Runtime patch preserves app-server full-access defaults", () => {
+  const original = `a=${PERMISSION_OVERRIDE_ORIGINAL};b=${PERMISSION_OVERRIDE_ORIGINAL}`;
+  const result = patchPermissionSource(original);
+  assert.equal(result.changed, true);
+  assert.equal(result.replacements, 2);
+  assert.equal(result.source.includes(PERMISSION_OVERRIDE_ORIGINAL), false);
+  assert.equal(
+    result.source.split(PERMISSION_OVERRIDE_PATCHED).length - 1,
+    2,
+  );
+});
 
 test("refresh-download and isolated cache-key options are deterministic", (t) => {
   const options = parseSyncOptions([
@@ -283,7 +339,10 @@ test("Shell, Core, and test composition obey the two-layer contract", (t) => {
   const shell = validateShellTree(shellTree);
   assert.equal(shell.manifest.version, "26.707.31428");
   assert.equal(shell.manifest.sourcePackageVersion, "26.707.3748.0");
+  assert.equal(shell.manifest.productionEligible, true);
+  assert.equal(shell.manifest.sourceGitSha, "a".repeat(40));
   assert.equal(fs.existsSync(path.join(shellTree, ...CORE_ENTRYPOINT.split("/"))), false);
+  assert.equal(fs.existsSync(path.join(shellTree, "resources", "codex")), false);
 
   const shellZip = path.join(temp, "Codex-Desktop-Shell-win-x64-26.707.31428.zip");
   createZip(shellTree, shellZip);

@@ -14,6 +14,7 @@ const CORE_MANIFEST_NAME = "agentrouter-core.json";
 const COMPOSITION_MANIFEST_NAME = "agentrouter-composition.json";
 const DESKTOP_ENTRYPOINT = "Codex.exe";
 const CORE_ENTRYPOINT = "resources/codex.exe";
+const NON_WINDOWS_CORE_ENTRYPOINT = "resources/codex";
 const CORE_ALLOWED_FILES = Object.freeze([CORE_MANIFEST_NAME, CORE_ENTRYPOINT]);
 
 function normalizeRelativePath(value) {
@@ -247,7 +248,12 @@ function prepareShellTree(rootDir, version, extra = {}) {
     throw new Error(`Desktop shell entrypoint is missing: ${desktopEntrypoint}`);
   }
   const coreEntrypoint = path.join(root, ...CORE_ENTRYPOINT.split("/"));
+  const nonWindowsCoreEntrypoint = path.join(
+    root,
+    ...NON_WINDOWS_CORE_ENTRYPOINT.split("/"),
+  );
   fs.rmSync(coreEntrypoint, { force: true });
+  fs.rmSync(nonWindowsCoreEntrypoint, { force: true });
   writeJson(path.join(root, SHELL_MANIFEST_NAME), createShellManifest(version, extra));
   return validateShellTree(root);
 }
@@ -280,6 +286,29 @@ function validateShellTree(rootDir, { requireCoreAbsent = true } = {}) {
   if (!String(manifest.sourcePackageVersion || "").trim()) {
     throw new Error("Shell manifest is missing sourcePackageVersion.");
   }
+  const hasSourceIdentity = [
+    "sourceGitSha",
+    "sourceBranch",
+    "productionEligible",
+  ].some((key) => Object.hasOwn(manifest, key));
+  if (hasSourceIdentity) {
+    if (!/^[0-9a-f]{40}$/.test(manifest.sourceGitSha || "")) {
+      throw new Error("Shell manifest has an invalid sourceGitSha.");
+    }
+    if (!String(manifest.sourceBranch || "").trim()) {
+      throw new Error("Shell manifest has an invalid sourceBranch.");
+    }
+    if (typeof manifest.productionEligible !== "boolean") {
+      throw new Error("Shell manifest has an invalid productionEligible value.");
+    }
+    if (
+      manifest.productionEligible &&
+      (!/^[0-9a-f]{40}$/.test(manifest.sourceRemoteSha || "") ||
+        manifest.sourceRemoteSha !== manifest.sourceGitSha)
+    ) {
+      throw new Error("Production Shell source is not bound to its remote commit.");
+    }
+  }
   if (
     manifest.requiredCore?.kind !== CORE_KIND ||
     manifest.requiredCore?.manifest !== CORE_MANIFEST_NAME ||
@@ -293,6 +322,13 @@ function validateShellTree(rootDir, { requireCoreAbsent = true } = {}) {
   const bundledCore = path.join(root, ...CORE_ENTRYPOINT.split("/"));
   if (requireCoreAbsent && fs.existsSync(bundledCore)) {
     throw new Error(`Shell must not contain ${CORE_ENTRYPOINT}.`);
+  }
+  const bundledNonWindowsCore = path.join(
+    root,
+    ...NON_WINDOWS_CORE_ENTRYPOINT.split("/"),
+  );
+  if (requireCoreAbsent && fs.existsSync(bundledNonWindowsCore)) {
+    throw new Error(`Windows Shell must not contain ${NON_WINDOWS_CORE_ENTRYPOINT}.`);
   }
   return { manifest, root };
 }
