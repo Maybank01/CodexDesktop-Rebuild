@@ -64,6 +64,7 @@ test("maintained Shell patch chain is minimal and strict by default", () => {
     "patch-account-readiness-logging.js",
     "patch-generated-image-preview.js",
     "patch-windows-onboarding-recovery.js",
+    "patch-windows-process-snapshot-fallback.js",
     "patch-agentrouter-managed-runtime.js",
     "patch-agentrouter-agent-directory.js",
     "patch-updater.js",
