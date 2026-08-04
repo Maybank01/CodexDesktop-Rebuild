@@ -49,12 +49,45 @@ function patchMain(bundle) {
       "this.sharedObjectRepository.set(`agentrouter_agent_connections`,o.flatMap(e=>e.endpointUrl?[{hostId:`agentrouter-agent:${e.agentId}`,displayName:`${e.roleName} · ${e.agentName}`,source:`agentrouter-agent`,roleId:e.roleId,roleName:e.roleName,agentId:e.agentId,agentName:e.agentName,threadId:e.threadId,websocketUrl:e.endpointUrl,autoConnect:!0}]:[]));";
     const connectedConnections =
       "let p=o.flatMap(e=>e.endpointUrl?[{hostId:`agentrouter-agent:${e.agentId}`,displayName:`${e.roleName} · ${e.agentName}`,source:`agentrouter-agent`,roleId:e.roleId,roleName:e.roleName,agentId:e.agentId,agentName:e.agentName,threadId:e.threadId,websocketUrl:e.endpointUrl,autoConnect:!0}]:[]);this.sharedObjectRepository.set(`agentrouter_agent_connections`,p);void this.remoteConnectionsHandler.connectRemoteConnectionsAndLogFailures(p.map(e=>e.hostId));";
+    const passiveConnections =
+      "let p=o.flatMap(e=>e.endpointUrl?[{hostId:`agentrouter-agent:${e.agentId}`,displayName:`${e.roleName} · ${e.agentName}`,source:`agentrouter-agent`,roleId:e.roleId,roleName:e.roleName,agentId:e.agentId,agentName:e.agentName,threadId:e.threadId,websocketUrl:e.endpointUrl,autoConnect:!1}]:[]);this.sharedObjectRepository.set(`agentrouter_agent_connections`,p);";
+    const registeredConnections =
+      "let p=o.flatMap(e=>e.endpointUrl?[{hostId:`agentrouter-agent:${e.agentId}`,displayName:`${e.roleName} · ${e.agentName}`,source:`agentrouter-agent`,roleId:e.roleId,roleName:e.roleName,agentId:e.agentId,agentName:e.agentName,threadId:e.threadId,websocketUrl:e.endpointUrl,autoConnect:!0}]:[]);this.sharedObjectRepository.set(`agentrouter_agent_connections`,p);";
+    const selectedConnection =
+      "let p=o.flatMap(e=>e.endpointUrl?[{hostId:`agentrouter-agent:${e.agentId}`,displayName:`${e.roleName} · ${e.agentName}`,source:`agentrouter-agent`,roleId:e.roleId,roleName:e.roleName,agentId:e.agentId,agentName:e.agentName,threadId:e.threadId,websocketUrl:e.endpointUrl,autoConnect:a.openRequest?.agentId===e.agentId}]:[]);this.sharedObjectRepository.set(`agentrouter_agent_connections`,p);";
     if (code.includes(disconnectedConnections)) {
       code = replaceOnce(
         code,
         disconnectedConnections,
+        registeredConnections,
+        "Agent Gateway on-demand connection",
+      );
+      upgraded = true;
+    }
+    if (code.includes(connectedConnections)) {
+      code = replaceOnce(
+        code,
         connectedConnections,
-        "Agent Gateway auto-connect",
+        registeredConnections,
+        "Agent Gateway eager connection removal",
+      );
+      upgraded = true;
+    }
+    if (code.includes(selectedConnection)) {
+      code = replaceOnce(
+        code,
+        selectedConnection,
+        registeredConnections,
+        "Agent Gateway selection decoupling",
+      );
+      upgraded = true;
+    }
+    if (code.includes(passiveConnections)) {
+      code = replaceOnce(
+        code,
+        passiveConnections,
+        registeredConnections,
+        "Agent Gateway persistent manager registration",
       );
       upgraded = true;
     }
@@ -63,12 +96,62 @@ function patchMain(bundle) {
       "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;setTimeout(()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())},150)}";
     const connectedNavigation =
       "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`,conversationId:u.threadId,hostId:`agentrouter-agent:${u.agentId}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(e,300),()=>setTimeout(e,300))}";
+    const windowReadyNavigation =
+      "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=(t=0)=>{let n=this.options.windowManager.getPrimaryWindow();if((!n||n.isDestroyed())&&t<60){setTimeout(()=>e(t+1),250);return}n&&!n.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(n,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`,conversationId:u.threadId,hostId:`agentrouter-agent:${u.agentId}`}),n.isMinimized()&&n.restore(),n.show(),n.focus())};this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(()=>e(),300),()=>setTimeout(()=>e(),300))}";
+    const deferredNavigation =
+      "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=(t=0)=>{let n=this.options.windowManager.getPrimaryWindow();if(!n||n.isDestroyed()){t<60&&setTimeout(()=>e(t+1),250);return}let r=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`,conversationId:u.threadId,hostId:`agentrouter-agent:${u.agentId}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(r,300),()=>{t<60&&setTimeout(()=>e(t+1),500)})};e()}";
+    const readyNavigation =
+      "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=(t=0)=>{let n=this.options.windowManager.getPrimaryWindow();if(!n||n.isDestroyed()){t<60&&setTimeout(()=>e(t+1),250);return}let r=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`,conversationId:u.threadId,hostId:`agentrouter-agent:${u.agentId}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(r,50),()=>{t<60&&setTimeout(()=>e(t+1),500)})};e()}";
+    const responsiveNavigation =
+      "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=(t=0)=>{let n=this.options.windowManager.getPrimaryWindow();if(!n||n.isDestroyed()){t<60&&setTimeout(()=>e(t+1),250);return}let r=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`,conversationId:u.threadId,hostId:`agentrouter-agent:${u.agentId}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};r();this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(r,50),()=>{t<60&&setTimeout(()=>e(t+1),500)})};e()}";
+    const loadingNavigation =
+      "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=(t=0)=>{let n=this.options.windowManager.getPrimaryWindow();if(!n||n.isDestroyed()){t<60&&setTimeout(()=>e(t+1),250);return}let r=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`,conversationId:u.threadId,hostId:`agentrouter-agent:${u.agentId}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.options.windowManager.sendMessageToWindow(n,{type:`navigate-to-route`,path:`/`});setTimeout(()=>{this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(r,50),()=>{t<60&&setTimeout(()=>e(t+1),500)})},150)};e()}";
+    const immediateLoadingNavigation =
+      "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=(t=0)=>{let n=this.options.windowManager.getPrimaryWindow();if(!n||n.isDestroyed()){t<60&&setTimeout(()=>e(t+1),250);return}let r=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`,conversationId:u.threadId,hostId:`agentrouter-agent:${u.agentId}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.options.windowManager.sendMessageToWindow(n,{type:`navigate-to-route`,path:`/`});this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(r,50),()=>{t<60&&setTimeout(()=>e(t+1),500)})};e()}";
+    const immediateNavigation =
+      "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=(t=0)=>{let n=this.options.windowManager.getPrimaryWindow();if(!n||n.isDestroyed()){t<60&&setTimeout(()=>e(t+1),250);return}let r=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`,conversationId:u.threadId,hostId:`agentrouter-agent:${u.agentId}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};r();this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(r,100),()=>{t<60&&setTimeout(()=>e(t+1),500)})};e()}";
     if (code.includes(eagerNavigation)) {
       code = replaceOnce(
         code,
         eagerNavigation,
-        connectedNavigation,
+        responsiveNavigation,
         "Connected Agent Session navigation",
+      );
+      upgraded = true;
+    }
+    if (code.includes(connectedNavigation)) {
+      code = replaceOnce(
+        code,
+        connectedNavigation,
+        responsiveNavigation,
+        "Agent Session window-ready navigation",
+      );
+      upgraded = true;
+    }
+    if (code.includes(windowReadyNavigation)) {
+      code = replaceOnce(
+        code,
+        windowReadyNavigation,
+        responsiveNavigation,
+        "Agent Session post-window connection",
+      );
+      upgraded = true;
+    }
+    if (code.includes(deferredNavigation)) {
+      code = replaceOnce(
+        code,
+        deferredNavigation,
+        responsiveNavigation,
+        "Connection-ready Agent Session navigation",
+      );
+      upgraded = true;
+    }
+    if (code.includes(immediateNavigation)) {
+      code = replaceOnce(
+        code,
+        immediateNavigation,
+        responsiveNavigation,
+        "Agent Session pre-connection navigation removal",
       );
       upgraded = true;
     }
@@ -79,8 +162,35 @@ function patchMain(bundle) {
       code = replaceOnce(
         code,
         connectedNavigationWithoutHost,
-        connectedNavigation,
+        responsiveNavigation,
         "Agent Session host-aware navigation payload",
+      );
+      upgraded = true;
+    }
+    if (code.includes(immediateLoadingNavigation)) {
+      code = replaceOnce(
+        code,
+        immediateLoadingNavigation,
+        responsiveNavigation,
+        "Agent Session new-task loading route removal",
+      );
+      upgraded = true;
+    }
+    if (code.includes(loadingNavigation)) {
+      code = replaceOnce(
+        code,
+        loadingNavigation,
+        responsiveNavigation,
+        "Agent Session new-task loading route removal",
+      );
+      upgraded = true;
+    }
+    if (code.includes(readyNavigation)) {
+      code = replaceOnce(
+        code,
+        readyNavigation,
+        responsiveNavigation,
+        "Agent Session immediate target loading route",
       );
       upgraded = true;
     }
@@ -175,9 +285,8 @@ function patchMain(bundle) {
     "this.sharedObjectRepository.set(`agentrouter_agent_directory`,s);",
     "let p=o.flatMap(e=>e.endpointUrl?[{hostId:`agentrouter-agent:${e.agentId}`,displayName:`${e.roleName} · ${e.agentName}`,source:`agentrouter-agent`,roleId:e.roleId,roleName:e.roleName,agentId:e.agentId,agentName:e.agentName,threadId:e.threadId,websocketUrl:e.endpointUrl,autoConnect:!0}]:[]);",
     "this.sharedObjectRepository.set(`agentrouter_agent_connections`,p);",
-    "void this.remoteConnectionsHandler.connectRemoteConnectionsAndLogFailures(p.map(e=>e.hostId));",
     "let l=a.openRequest,u=l&&o.find(e=>e.agentId===l.agentId&&e.endpointUrl);",
-    "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`,conversationId:u.threadId,hostId:`agentrouter-agent:${u.agentId}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(e,300),()=>setTimeout(e,300))}",
+    "if(u&&typeof l.requestId===`string`&&this.agentRouterLastOpenRequestId!==l.requestId){this.agentRouterLastOpenRequestId=l.requestId;let e=(t=0)=>{let n=this.options.windowManager.getPrimaryWindow();if(!n||n.isDestroyed()){t<60&&setTimeout(()=>e(t+1),250);return}let r=()=>{let e=this.options.windowManager.getPrimaryWindow();e&&!e.isDestroyed()&&(this.options.windowManager.sendMessageToWindow(e,{type:`navigate-to-route`,path:`/local/${encodeURIComponent(u.threadId)}`,conversationId:u.threadId,hostId:`agentrouter-agent:${u.agentId}`}),e.isMinimized()&&e.restore(),e.show(),e.focus())};r();this.remoteConnectionsHandler.ensureRemoteConnectionConnected(`agentrouter-agent:${u.agentId}`).then(()=>setTimeout(r,50),()=>{t<60&&setTimeout(()=>e(t+1),500)})};e()}",
     "})},40)};",
     "i();",
     "try{let r=t.watch(n.dirname(e),(t,r)=>{r==null||r.toString()===n.basename(e)?i():void 0});this.disposables.add({dispose:()=>r.close()})}catch{}",
@@ -373,4 +482,13 @@ function main() {
   rendererBundles.forEach(patchRendererNavigation);
 }
 
-main();
+module.exports = {
+  patchMain,
+  patchHostConfig,
+  patchSidebar,
+  patchRendererNavigation,
+};
+
+if (require.main === module) {
+  main();
+}

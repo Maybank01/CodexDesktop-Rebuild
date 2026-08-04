@@ -240,6 +240,35 @@ test("release source URL normalization treats GitHub HTTPS and SSH as the same r
   );
 });
 
+test("Agent directory keeps prepared Gateways warm without a redundant explicit connection loop", () => {
+  const source = fs.readFileSync(
+    path.join(PROJECT_ROOT, "scripts", "patch-agentrouter-agent-directory.js"),
+    "utf8",
+  );
+  const freshPatch = source.slice(
+    source.indexOf("const directoryMethod = ["),
+    source.indexOf("const routeAnchor ="),
+  );
+  assert.match(freshPatch, /autoConnect:!0/);
+  assert.doesNotMatch(
+    freshPatch,
+    /connectRemoteConnectionsAndLogFailures\(p\.map\(e=>e\.hostId\)\)/,
+  );
+  assert.match(
+    source,
+    /ensureRemoteConnectionConnected\(`agentrouter-agent:\$\{u\.agentId\}`\)/,
+  );
+  assert.match(
+    freshPatch,
+    /r\(\);this\.remoteConnectionsHandler\.ensureRemoteConnectionConnected/,
+  );
+  assert.match(source, /then\(\(\)=>setTimeout\(r,50\)/);
+  assert.doesNotMatch(
+    freshPatch,
+    /sendMessageToWindow\(n,\{type:`navigate-to-route`,path:`\/`\}\)/,
+  );
+});
+
 test("managed Runtime patch disables upstream updates and repairs relocated ACLs", () => {
   const original = `class RuntimePoller{${RUNTIME_UPDATER_ORIGINAL}\`enabled\`:\`disabled\`}}`;
   const result = patchManagedRuntimeMainSource(original);
