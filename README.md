@@ -78,6 +78,15 @@ all `--*-mirror-url` options fail closed.
 the freshly synchronized upstream tree no longer matches. Use `--allow-noop`
 only when deliberately re-checking a tree that was already patched.
 
+Every component Shell declares `runtimeControlProtocol: 1`. When the Client
+launches it with `AGENTROUTER_RUNTIME_CONTROL_PROTOCOL=1` and a launch ID, the
+Shell writes ordered `AGENTROUTER_RUNTIME_EVENT` JSON lines for
+`shell-started`, `core-spawned`, and `app-server-ready`. The final event uses
+the version reported by the initialized app-server; a window appearing or a
+process merely surviving is not readiness. `startup-failed` is diagnostic and
+the Client still owns the startup timeout, process termination, and lifecycle
+state machine.
+
 `npm run build:win-x64` remains the legacy one-file build and defaults to
 `--artifact composite`. The manual `Windows Components (Manual Test)` workflow
 builds test artifacts only; it does not create a tag or GitHub Release and does

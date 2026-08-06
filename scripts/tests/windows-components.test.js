@@ -23,6 +23,10 @@ const {
   validateShellTree,
   writeJson,
 } = require("../windows-component-util");
+const {
+  PATCH_MARKER: RUNTIME_READINESS_PATCH_MARKER,
+  patchSource: patchRuntimeReadinessSource,
+} = require("../patch-agentrouter-runtime-readiness");
 const { normalizeRemoteUrl } = require("../release-source-guard");
 const { getSyncCacheDir, parseSyncOptions, refreshCachedArchive } = require("../sync-upstream");
 const { PATCHES, getPassArgs } = require("../patch-all");
@@ -62,6 +66,7 @@ test("maintained Shell patch chain is minimal and strict by default", () => {
     "patch-model-list-filter.js",
     "patch-plugin-auth.js",
     "patch-account-readiness-logging.js",
+    "patch-agentrouter-runtime-readiness.js",
     "patch-generated-image-preview.js",
     "patch-windows-onboarding-recovery.js",
     "patch-windows-process-snapshot-fallback.js",
@@ -167,6 +172,32 @@ test("account/read response logging fails closed when routing identity fields dr
     () => collectReadinessPatches(ast, source),
     /response_routed safe payload is missing requestId/,
   );
+});
+
+test("managed Runtime readiness emits ordered Shell, Core, and app-server events", () => {
+  const source = [
+    "class Connection{",
+    "async completeInitialization(){",
+    "this.logger.info(`Codex CLI initialized`),this.initialized=!0,",
+    "this.initializingPromise=null}",
+    "routeIncomingMessage(e){",
+    "if(e.error){let t=Error(`Failed to initialize Codex app-server: ${JSON.stringify(e.error)}`);this.rejectInitialize?.(t)}",
+    "}}",
+  ].join("");
+  const result = patchRuntimeReadinessSource(source);
+  assert.equal(result.changed, true);
+  assert.match(result.source, new RegExp(RUNTIME_READINESS_PATCH_MARKER));
+  assert.match(result.source, /type:t/);
+  assert.match(result.source, /`shell-started`/);
+  assert.match(result.source, /`core-spawned`/);
+  assert.match(result.source, /`app-server-ready`/);
+  assert.match(
+    result.source,
+    /__agentrouterRuntimeReadyV1\?\.\(this\.initializedAppServerVersion\)/,
+  );
+  assert.match(result.source, /__agentrouterRuntimeFailV1\?\.\(`app-server`\)/);
+  assert.doesNotThrow(() => parse(result.source, { ecmaVersion: "latest" }));
+  assert.equal(patchRuntimeReadinessSource(result.source).changed, false);
 });
 
 test("Fast mode patch covers negative and positive ChatGPT auth gates", () => {
@@ -371,6 +402,7 @@ test("Shell, Core, and test composition obey the two-layer contract", (t) => {
   assert.equal(shell.manifest.version, "26.707.31428");
   assert.equal(shell.manifest.sourcePackageVersion, "26.707.3748.0");
   assert.equal(shell.manifest.productionEligible, true);
+  assert.equal(shell.manifest.runtimeControlProtocol, 1);
   assert.equal(shell.manifest.sourceGitSha, "a".repeat(40));
   assert.equal(fs.existsSync(path.join(shellTree, ...CORE_ENTRYPOINT.split("/"))), false);
   assert.equal(fs.existsSync(path.join(shellTree, "resources", "codex")), false);

@@ -16,6 +16,7 @@ const DESKTOP_ENTRYPOINT = "Codex.exe";
 const CORE_ENTRYPOINT = "resources/codex.exe";
 const NON_WINDOWS_CORE_ENTRYPOINT = "resources/codex";
 const CORE_ALLOWED_FILES = Object.freeze([CORE_MANIFEST_NAME, CORE_ENTRYPOINT]);
+const RUNTIME_CONTROL_PROTOCOL = 1;
 
 function normalizeRelativePath(value) {
   return String(value).replaceAll("\\", "/").replace(/^\.\//, "");
@@ -232,6 +233,7 @@ function createShellManifest(version, extra = {}) {
     arch: "x64",
     version: String(version),
     entrypoint: DESKTOP_ENTRYPOINT,
+    runtimeControlProtocol: RUNTIME_CONTROL_PROTOCOL,
     requiredCore: {
       kind: CORE_KIND,
       manifest: CORE_MANIFEST_NAME,
@@ -285,6 +287,11 @@ function validateShellTree(rootDir, { requireCoreAbsent = true } = {}) {
   }
   if (!String(manifest.sourcePackageVersion || "").trim()) {
     throw new Error("Shell manifest is missing sourcePackageVersion.");
+  }
+  if (manifest.runtimeControlProtocol !== RUNTIME_CONTROL_PROTOCOL) {
+    throw new Error(
+      `Shell manifest must declare Runtime control protocol ${RUNTIME_CONTROL_PROTOCOL}.`,
+    );
   }
   const hasSourceIdentity = [
     "sourceGitSha",
@@ -455,6 +462,7 @@ module.exports = {
   CORE_KIND,
   CORE_MANIFEST_NAME,
   DESKTOP_ENTRYPOINT,
+  RUNTIME_CONTROL_PROTOCOL,
   SHELL_KIND,
   SHELL_MANIFEST_NAME,
   assertPeExecutable,
